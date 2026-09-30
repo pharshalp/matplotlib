@@ -1,7 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import markers
-from matplotlib._api.deprecation import MatplotlibDeprecationWarning
 from matplotlib.path import Path
 from matplotlib.testing.decorators import check_figures_equal
 from matplotlib.transforms import Affine2D
@@ -23,6 +22,7 @@ def test_marker_fillstyle():
     r'$\frac{1}{2}$',
     "$\u266B$",
     1,
+    np.int64(1),
     markers.TICKLEFT,
     [[-1, 0], [1, 0]],
     np.array([[-1, 0], [1, 0]]),
@@ -38,15 +38,6 @@ def test_marker_fillstyle():
 def test_markers_valid(marker):
     # Checking this doesn't fail.
     markers.MarkerStyle(marker)
-
-
-def test_deprecated_marker():
-    with pytest.warns(MatplotlibDeprecationWarning):
-        ms = markers.MarkerStyle()
-    markers.MarkerStyle(ms)  # No warning on copy.
-    with pytest.warns(MatplotlibDeprecationWarning):
-        ms = markers.MarkerStyle(None)
-    markers.MarkerStyle(ms)  # No warning on copy.
 
 
 @pytest.mark.parametrize('marker', [
@@ -73,7 +64,7 @@ class UnsnappedMarkerStyle(markers.MarkerStyle):
         self._snap_threshold = None
 
 
-@check_figures_equal()
+@check_figures_equal(extensions=['png', 'pdf', 'svg'])
 def test_poly_marker(fig_test, fig_ref):
     ax_test = fig_test.add_subplot()
     ax_ref = fig_ref.add_subplot()
@@ -133,7 +124,7 @@ def test_star_marker():
 # are corners and get a slight bevel. The reference markers are just singular
 # lines without corners, so they have no bevel, and we need to add a slight
 # tolerance.
-@check_figures_equal(tol=1.45)
+@check_figures_equal(extensions=['png', 'pdf', 'svg'], tol=1.45)
 def test_asterisk_marker(fig_test, fig_ref, request):
     ax_test = fig_test.add_subplot()
     ax_ref = fig_ref.add_subplot()
@@ -166,7 +157,19 @@ def test_asterisk_marker(fig_test, fig_ref, request):
     ax_ref.set(xlim=(-0.5, 1.5), ylim=(-0.5, 1.5))
 
 
-@check_figures_equal()
+# The bullet mathtext marker is not quite a circle, so this is not a perfect match, but
+# it is close enough to confirm that the text-based marker is centred correctly. But we
+# still need a small tolerance to work around that difference.
+@check_figures_equal(tol=1.86)
+def test_text_marker(fig_ref, fig_test):
+    ax_ref = fig_ref.add_subplot()
+    ax_test = fig_test.add_subplot()
+
+    ax_ref.plot(0, 0, marker=r'o', markersize=100, markeredgewidth=0)
+    ax_test.plot(0, 0, marker=r'$\bullet$', markersize=100, markeredgewidth=0)
+
+
+@check_figures_equal(extensions=['png', 'pdf', 'svg'])
 def test_marker_clipping(fig_ref, fig_test):
     # Plotting multiple markers can trigger different optimized paths in
     # backends, so compare single markers vs multiple to ensure they are
@@ -179,9 +182,9 @@ def test_marker_clipping(fig_ref, fig_test):
     width = 2 * marker_size * ncol
     height = 2 * marker_size * nrow * 2
     fig_ref.set_size_inches((width / fig_ref.dpi, height / fig_ref.dpi))
-    ax_ref = fig_ref.add_axes([0, 0, 1, 1])
+    ax_ref = fig_ref.add_axes((0, 0, 1, 1))
     fig_test.set_size_inches((width / fig_test.dpi, height / fig_ref.dpi))
-    ax_test = fig_test.add_axes([0, 0, 1, 1])
+    ax_test = fig_test.add_axes((0, 0, 1, 1))
 
     for i, marker in enumerate(markers.MarkerStyle.markers):
         x = i % ncol
@@ -217,18 +220,16 @@ def test_marker_init_transforms():
 
 def test_marker_init_joinstyle():
     marker = markers.MarkerStyle("*")
-    jstl = markers.JoinStyle.round
-    styled_marker = markers.MarkerStyle("*", joinstyle=jstl)
-    assert styled_marker.get_joinstyle() == jstl
-    assert marker.get_joinstyle() != jstl
+    styled_marker = markers.MarkerStyle("*", joinstyle="round")
+    assert styled_marker.get_joinstyle() == "round"
+    assert marker.get_joinstyle() != "round"
 
 
 def test_marker_init_captyle():
     marker = markers.MarkerStyle("*")
-    capstl = markers.CapStyle.round
-    styled_marker = markers.MarkerStyle("*", capstyle=capstl)
-    assert styled_marker.get_capstyle() == capstl
-    assert marker.get_capstyle() != capstl
+    styled_marker = markers.MarkerStyle("*", capstyle="round")
+    assert styled_marker.get_capstyle() == "round"
+    assert marker.get_capstyle() != "round"
 
 
 @pytest.mark.parametrize("marker,transform,expected", [

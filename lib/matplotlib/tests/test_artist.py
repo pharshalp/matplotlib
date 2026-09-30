@@ -5,6 +5,7 @@ import numpy as np
 
 import pytest
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
@@ -12,6 +13,8 @@ import matplotlib.path as mpath
 import matplotlib.transforms as mtransforms
 import matplotlib.collections as mcollections
 import matplotlib.artist as martist
+import matplotlib.backend_bases as mbackend_bases
+import matplotlib as mpl
 from matplotlib.testing.decorators import check_figures_equal, image_comparison
 
 
@@ -20,8 +23,8 @@ def test_patch_transform_of_none():
     # specifications
 
     ax = plt.axes()
-    ax.set_xlim([1, 3])
-    ax.set_ylim([1, 3])
+    ax.set_xlim(1, 3)
+    ax.set_ylim(1, 3)
 
     # Draw an ellipse over data coord (2, 2) by specifying device coords.
     xy_data = (2, 2)
@@ -62,8 +65,8 @@ def test_collection_transform_of_none():
     # transform specifications
 
     ax = plt.axes()
-    ax.set_xlim([1, 3])
-    ax.set_ylim([1, 3])
+    ax.set_xlim(1, 3)
+    ax.set_ylim(1, 3)
 
     # draw an ellipse over data coord (2, 2) by specifying device coords
     xy_data = (2, 2)
@@ -93,7 +96,7 @@ def test_collection_transform_of_none():
     assert isinstance(c.get_offset_transform(), mtransforms.IdentityTransform)
 
 
-@image_comparison(["clip_path_clipping"], remove_text=True)
+@image_comparison(["clip_path_clipping"], remove_text=True, style='_classic_test')
 def test_clipping():
     exterior = mpath.Path.unit_rectangle().deepcopy()
     exterior.vertices *= 4
@@ -117,15 +120,15 @@ def test_clipping():
     patch.set_clip_path(clip_path, ax2.transData)
     ax2.add_patch(patch)
 
-    ax1.set_xlim([-3, 3])
-    ax1.set_ylim([-3, 3])
+    ax1.set_xlim(-3, 3)
+    ax1.set_ylim(-3, 3)
 
 
-@check_figures_equal(extensions=['png'])
+@check_figures_equal()
 def test_clipping_zoom(fig_test, fig_ref):
     # This test places the Axes and sets its limits such that the clip path is
     # outside the figure entirely. This should not break the clip path.
-    ax_test = fig_test.add_axes([0, 0, 1, 1])
+    ax_test = fig_test.add_axes((0, 0, 1, 1))
     l, = ax_test.plot([-3, 3], [-3, 3])
     # Explicit Path instead of a Rectangle uses clip path processing, instead
     # of a clip box optimization.
@@ -133,7 +136,7 @@ def test_clipping_zoom(fig_test, fig_ref):
     p = mpatches.PathPatch(p, transform=ax_test.transData)
     l.set_clip_path(p)
 
-    ax_ref = fig_ref.add_axes([0, 0, 1, 1])
+    ax_ref = fig_ref.add_axes((0, 0, 1, 1))
     ax_ref.plot([-3, 3], [-3, 3])
 
     ax_ref.set(xlim=(0.5, 0.75), ylim=(0.5, 0.75))
@@ -205,7 +208,7 @@ def test_remove():
 
     for art in [im, ln]:
         assert art.axes is None
-        assert art.figure is None
+        assert art.get_figure() is None
 
     assert im not in ax._mouseover_set
     assert fig.stale
@@ -214,17 +217,14 @@ def test_remove():
 
 @image_comparison(["default_edges.png"], remove_text=True, style='default')
 def test_default_edges():
-    # Remove this line when this test image is regenerated.
-    plt.rcParams['text.kerning_factor'] = 6
-
     fig, [[ax1, ax2], [ax3, ax4]] = plt.subplots(2, 2)
 
     ax1.plot(np.arange(10), np.arange(10), 'x',
              np.arange(10) + 1, np.arange(10), 'o')
     ax2.bar(np.arange(10), np.arange(10), align='edge')
     ax3.text(0, 0, "BOX", size=24, bbox=dict(boxstyle='sawtooth'))
-    ax3.set_xlim((-1, 1))
-    ax3.set_ylim((-1, 1))
+    ax3.set_xlim(-1, 1)
+    ax3.set_ylim(-1, 1)
     pp1 = mpatches.PathPatch(
         mpath.Path([(0, 0), (1, 0), (1, 1), (0, 0)],
                    [mpath.Path.MOVETO, mpath.Path.CURVE3,
@@ -254,6 +254,36 @@ def test_setp():
     sio = io.StringIO()
     plt.setp(lines1, 'zorder', file=sio)
     assert sio.getvalue() == '  zorder: float\n'
+
+
+def test_artist_set():
+    line = mlines.Line2D([], [])
+    line.set(linewidth=7)
+    assert line.get_linewidth() == 7
+
+    # Property aliases should work
+    line.set(lw=5)
+    assert line.get_linewidth() == 5
+
+
+def test_artist_set_invalid_property_raises():
+    """
+    Test that set() raises AttributeError for invalid property names.
+    """
+    line = mlines.Line2D([0, 1], [0, 1])
+
+    with pytest.raises(AttributeError, match="unexpected keyword argument"):
+        line.set(not_a_property=1)
+
+
+def test_artist_set_duplicate_aliases_raises():
+    """
+    Test that set() raises TypeError when both a property and its alias are provided.
+    """
+    line = mlines.Line2D([0, 1], [0, 1])
+
+    with pytest.raises(TypeError, match="aliases of one another"):
+        line.set(lw=2, linewidth=3)
 
 
 def test_None_zorder():
@@ -322,6 +352,12 @@ def test_set_alpha_for_array():
         art._set_alpha_for_array([0.5, np.nan])
 
 
+def test_set_blend_mode():
+    art = martist.Artist()
+    with pytest.raises(ValueError, match="not a valid value for blend_mode"):
+        art.set_blend_mode("invalid_blend_mode")
+
+
 def test_callbacks():
     def func(artist):
         func.counter += 1
@@ -372,3 +408,224 @@ def test_set_is_overwritten():
         pass
 
     assert MyArtist4.set is MyArtist3.set
+
+
+def test_format_cursor_data_BoundaryNorm():
+    """Test if cursor data is correct when using BoundaryNorm."""
+    X = np.empty((3, 3))
+    X[0, 0] = 0.9
+    X[0, 1] = 0.99
+    X[0, 2] = 0.999
+    X[1, 0] = -1
+    X[1, 1] = 0
+    X[1, 2] = 1
+    X[2, 0] = 0.09
+    X[2, 1] = 0.009
+    X[2, 2] = 0.0009
+
+    # map range -1..1 to 0..256 in 0.1 steps
+    fig, ax = plt.subplots()
+    fig.suptitle("-1..1 to 0..256 in 0.1")
+    norm = mcolors.BoundaryNorm(np.linspace(-1, 1, 20), 256)
+    img = ax.imshow(X, cmap='RdBu_r', norm=norm)
+
+    labels_list = [
+        "[0.9]",
+        "[1.]",
+        "[1.]",
+        "[-1.0]",
+        "[0.0]",
+        "[1.0]",
+        "[0.09]",
+        "[0.009]",
+        "[0.0009]",
+    ]
+    for v, label in zip(X.flat, labels_list):
+        # label = "[{:-#.{}g}]".format(v, cbook._g_sig_digits(v, 0.1))
+        assert img.format_cursor_data(v) == label
+
+    plt.close()
+
+    # map range -1..1 to 0..256 in 0.01 steps
+    fig, ax = plt.subplots()
+    fig.suptitle("-1..1 to 0..256 in 0.01")
+    cmap = mpl.colormaps['RdBu_r'].resampled(200)
+    norm = mcolors.BoundaryNorm(np.linspace(-1, 1, 200), 200)
+    img = ax.imshow(X, cmap=cmap, norm=norm)
+
+    labels_list = [
+        "[0.90]",
+        "[0.99]",
+        "[1.0]",
+        "[-1.00]",
+        "[0.00]",
+        "[1.00]",
+        "[0.09]",
+        "[0.009]",
+        "[0.0009]",
+    ]
+    for v, label in zip(X.flat, labels_list):
+        # label = "[{:-#.{}g}]".format(v, cbook._g_sig_digits(v, 0.01))
+        assert img.format_cursor_data(v) == label
+
+    plt.close()
+
+    # map range -1..1 to 0..256 in 0.01 steps
+    fig, ax = plt.subplots()
+    fig.suptitle("-1..1 to 0..256 in 0.001")
+    cmap = mpl.colormaps['RdBu_r'].resampled(2000)
+    norm = mcolors.BoundaryNorm(np.linspace(-1, 1, 2000), 2000)
+    img = ax.imshow(X, cmap=cmap, norm=norm)
+
+    labels_list = [
+        "[0.900]",
+        "[0.990]",
+        "[0.999]",
+        "[-1.000]",
+        "[0.000]",
+        "[1.000]",
+        "[0.090]",
+        "[0.009]",
+        "[0.0009]",
+    ]
+    for v, label in zip(X.flat, labels_list):
+        # label = "[{:-#.{}g}]".format(v, cbook._g_sig_digits(v, 0.001))
+        assert img.format_cursor_data(v) == label
+
+    plt.close()
+
+    # different testing data set with
+    # out of bounds values for 0..1 range
+    X = np.empty((7, 1))
+    X[0] = -1.0
+    X[1] = 0.0
+    X[2] = 0.1
+    X[3] = 0.5
+    X[4] = 0.9
+    X[5] = 1.0
+    X[6] = 2.0
+
+    labels_list = [
+        "[-1.0]",
+        "[0.0]",
+        "[0.1]",
+        "[0.5]",
+        "[0.9]",
+        "[1.0]",
+        "[2.0]",
+    ]
+
+    fig, ax = plt.subplots()
+    fig.suptitle("noclip, neither")
+    norm = mcolors.BoundaryNorm(
+        np.linspace(0, 1, 4, endpoint=True), 256, clip=False, extend='neither')
+    img = ax.imshow(X, cmap='RdBu_r', norm=norm)
+    for v, label in zip(X.flat, labels_list):
+        # label = "[{:-#.{}g}]".format(v, cbook._g_sig_digits(v, 0.33))
+        assert img.format_cursor_data(v) == label
+
+    plt.close()
+
+    fig, ax = plt.subplots()
+    fig.suptitle("noclip, min")
+    norm = mcolors.BoundaryNorm(
+        np.linspace(0, 1, 4, endpoint=True), 256, clip=False, extend='min')
+    img = ax.imshow(X, cmap='RdBu_r', norm=norm)
+    for v, label in zip(X.flat, labels_list):
+        # label = "[{:-#.{}g}]".format(v, cbook._g_sig_digits(v, 0.33))
+        assert img.format_cursor_data(v) == label
+
+    plt.close()
+
+    fig, ax = plt.subplots()
+    fig.suptitle("noclip, max")
+    norm = mcolors.BoundaryNorm(
+        np.linspace(0, 1, 4, endpoint=True), 256, clip=False, extend='max')
+    img = ax.imshow(X, cmap='RdBu_r', norm=norm)
+    for v, label in zip(X.flat, labels_list):
+        # label = "[{:-#.{}g}]".format(v, cbook._g_sig_digits(v, 0.33))
+        assert img.format_cursor_data(v) == label
+
+    plt.close()
+
+    fig, ax = plt.subplots()
+    fig.suptitle("noclip, both")
+    norm = mcolors.BoundaryNorm(
+        np.linspace(0, 1, 4, endpoint=True), 256, clip=False, extend='both')
+    img = ax.imshow(X, cmap='RdBu_r', norm=norm)
+    for v, label in zip(X.flat, labels_list):
+        # label = "[{:-#.{}g}]".format(v, cbook._g_sig_digits(v, 0.33))
+        assert img.format_cursor_data(v) == label
+
+    plt.close()
+
+    fig, ax = plt.subplots()
+    fig.suptitle("clip, neither")
+    norm = mcolors.BoundaryNorm(
+        np.linspace(0, 1, 4, endpoint=True), 256, clip=True, extend='neither')
+    img = ax.imshow(X, cmap='RdBu_r', norm=norm)
+    for v, label in zip(X.flat, labels_list):
+        # label = "[{:-#.{}g}]".format(v, cbook._g_sig_digits(v, 0.33))
+        assert img.format_cursor_data(v) == label
+
+    plt.close()
+
+
+def test_auto_no_rasterize():
+    class Gen1(martist.Artist):
+        ...
+
+    assert 'draw' in Gen1.__dict__
+    assert Gen1.__dict__['draw'] is Gen1.draw
+
+    class Gen2(Gen1):
+        ...
+
+    assert 'draw' not in Gen2.__dict__
+    assert Gen2.draw is Gen1.draw
+
+
+def test_draw_wraper_forward_input():
+    class TestKlass(martist.Artist):
+        def draw(self, renderer, extra):
+            return extra
+
+    art = TestKlass()
+    renderer = mbackend_bases.RendererBase()
+
+    assert 'aardvark' == art.draw(renderer, 'aardvark')
+    assert 'aardvark' == art.draw(renderer, extra='aardvark')
+
+
+def test_get_figure():
+    fig = plt.figure()
+    sfig1 = fig.subfigures()
+    sfig2 = sfig1.subfigures()
+    ax = sfig2.subplots()
+
+    assert fig.get_figure(root=True) is fig
+    assert fig.get_figure(root=False) is fig
+
+    assert ax.get_figure() is sfig2
+    assert ax.get_figure(root=False) is sfig2
+    assert ax.get_figure(root=True) is fig
+
+    # SubFigure.get_figure has separate implementation but should give consistent
+    # results to other artists.
+    assert sfig2.get_figure(root=False) is sfig1
+    assert sfig2.get_figure(root=True) is fig
+    # Currently different results by default.
+    with pytest.warns(mpl.MatplotlibDeprecationWarning):
+        assert sfig2.get_figure() is fig
+    # No deprecation warning if root and parent figure are the same.
+    assert sfig1.get_figure() is fig
+
+    # An artist not yet attached to anything has no figure.
+    ln = mlines.Line2D([], [])
+    assert ln.get_figure(root=True) is None
+    assert ln.get_figure(root=False) is None
+
+    # figure attribute is root for (Sub)Figures but parent for other artists.
+    assert ax.figure is sfig2
+    assert fig.figure is fig
+    assert sfig2.figure is fig

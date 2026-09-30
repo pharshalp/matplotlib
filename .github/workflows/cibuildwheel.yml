@@ -1,114 +1,155 @@
+---
 name: Build CI wheels
 
 on:
+  # Save CI by only running this on release branches or tags.
   push:
     branches:
       - main
       - v[0-9]+.[0-9]+.x
     tags:
       - v*
+  # Also allow running this action on PRs if requested by applying the
+  # "Run cibuildwheel" label.
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+
+permissions: {}
 
 jobs:
-  build_wheels:
-    name: Build wheels on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    env:
-      min-numpy-version: "1.17.3"
-      min-numpy-hash: "b6/d6/be8f975f5322336f62371c9abeb936d592c98c047ad63035f1b38ae08efe"
-      CIBW_ARCHS_MACOS: "x86_64 universal2 arm64"
-    strategy:
-      matrix:
-        os: [ubuntu-18.04, windows-latest, macos-10.15]
-        cibw_archs: ["auto"]
-        include:
-          - os: ubuntu-18.04
-            cibw_archs: "aarch64"
+  build_sdist:
+    if: >-
+      github.repository == 'matplotlib/matplotlib' && (
+        github.event_name == 'push' ||
+        github.event_name == 'pull_request' && (
+          (
+            github.event.action == 'labeled' &&
+            github.event.label.name == 'CI: Run cibuildwheel'
+          ) ||
+          contains(github.event.pull_request.labels.*.name,
+                   'CI: Run cibuildwheel')
+        )
+      )
+    name: Build sdist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      SDIST_NAME: ${{ steps.sdist.outputs.SDIST_NAME }}
 
     steps:
-      - name: Set up QEMU
-        if: matrix.cibw_archs == 'aarch64'
-        uses: docker/setup-qemu-action@v1
-        with:
-          platforms: arm64
-
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         name: Install Python
         with:
-          python-version: '3.7'
+          python-version: '3.12'
 
-      - uses: actions/cache@v2
-        id: numpy-cache
+      # Something changed somewhere that prevents the downloaded-at-build-time
+      # licenses from being included in built wheels, so pre-download them so
+      # that they exist before the build and are included.
+      - name: Pre-download bundled licenses
+        run: >
+          curl -Lo LICENSE/LICENSE_QHULL
+          https://github.com/qhull/qhull/raw/2020.2/COPYING.txt
+
+      - name: Install dependencies
+        run: python -m pip install build twine
+
+      - name: Build sdist
+        id: sdist
+        run: |
+          python -m build --sdist
+          python ci/export_sdist_name.py
+
+      - name: Check README rendering for PyPI
+        run: twine check dist/*
+
+      - name: Upload sdist result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          path: numpy-aarch64-cache/
-          key: numpy-${{ matrix.cibw_archs }}-cache-${{ env.min-numpy-version }}
+          name: cibw-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
 
-      - name: Install cibuildwheel
-        run: |
-          python -m pip install cibuildwheel==2.1.1
+  build_wheels:
+    if: >-
+      github.repository == 'matplotlib/matplotlib' && (
+        github.event_name == 'push' ||
+        github.event_name == 'pull_request' && (
+          (
+            github.event.action == 'labeled' &&
+            github.event.label.name == 'CI: Run cibuildwheel'
+          ) ||
+          contains(github.event.pull_request.labels.*.name,
+                   'CI: Run cibuildwheel')
+        )
+      )
+    needs: build_sdist
+    name: Build wheels on ${{ matrix.os }} for ${{ matrix.cibw_archs }}
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cibw_archs: "x86_64"
+          - os: ubuntu-24.04-arm
+            cibw_archs: "aarch64"
+          - os: windows-latest
+            cibw_archs: "AMD64"
+          - os: windows-11-arm
+            cibw_archs: "ARM64"
+          - os: macos-15-intel
+            cibw_archs: "x86_64"
+          - os: macos-15
+            cibw_archs: "arm64"
 
-      - name: Build minimum NumPy for aarch64
-        if: matrix.cibw_archs == 'aarch64' && steps.numpy-cache.outputs.cache-hit != 'true'
-        run: |
-          wget https://files.pythonhosted.org/packages/${{ env.min-numpy-hash }}/numpy-${{ env.min-numpy-version }}.zip
-          unzip numpy-${{ env.min-numpy-version }}.zip
-          cd numpy-${{ env.min-numpy-version }}
-          python -m cibuildwheel --output-dir ../numpy-aarch64-cache
-        env:
-          CIBW_BUILD: "cp37-* cp38-*"
-          CIBW_ARCHS: aarch64
-
-      - name: Build wheels for CPython 3.10
-        run: |
-          python -m cibuildwheel --output-dir dist
-        env:
-          CIBW_BUILD: "cp310-*"
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
-          CIBW_MANYLINUX_I686_IMAGE: manylinux2014
-          CIBW_BEFORE_BUILD: pip install certifi numpy==1.21.3
-          MPL_DISABLE_FH4: "yes"
-          CIBW_ARCHS: ${{ matrix.cibw_archs }}
-
-      - name: Build wheels for CPython 3.9
-        run: |
-          python -m cibuildwheel --output-dir dist
-        env:
-          CIBW_BUILD: "cp39-*"
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux1
-          CIBW_MANYLINUX_I686_IMAGE: manylinux1
-          CIBW_BEFORE_BUILD: pip install certifi numpy==1.19.3
-          MPL_DISABLE_FH4: "yes"
-          CIBW_ARCHS: ${{ matrix.cibw_archs }}
-
-      - name: Build wheels for CPython
-        run: |
-          python -m cibuildwheel --output-dir dist
-        env:
-          CIBW_BUILD: "cp37-* cp38-*"
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux1
-          CIBW_MANYLINUX_I686_IMAGE: manylinux1
-          CIBW_BEFORE_BUILD: pip install certifi; pip install --find-links=numpy-aarch64-cache/ numpy==${{ env.min-numpy-version }}
-          MPL_DISABLE_FH4: "yes"
-          CIBW_ARCHS: ${{ matrix.cibw_archs }}
-
-      - name: Build wheels for PyPy
-        run: |
-          python -m cibuildwheel --output-dir dist
-        env:
-          CIBW_BUILD: "pp37-*"
-          CIBW_BEFORE_BUILD: pip install certifi numpy==${{ env.min-numpy-version }}
-          CIBW_ARCHS: ${{ matrix.cibw_archs }}
-          PIP_USE_FEATURE: in-tree-build
-        if: matrix.cibw_archs != 'aarch64'
-
-      - name: Validate that LICENSE files are included in wheels
-        run: |
-          python ./ci/check_wheel_licenses.py
-
-      - uses: actions/upload-artifact@v2
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: wheels
-          path: ./dist/*.whl
+          name: cibw-sdist
+          path: dist/
+
+      - name: Purge Strawberry Perl
+        if: startsWith(matrix.os, 'windows-')
+        run: Remove-Item -Recurse C:\Strawberry
+
+      - name: Build wheels for CPython 3.14
+        uses: pypa/cibuildwheel@e090b81e30c4d855ea63bf4b6e59204c09a101ae  # v4.2.1
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.SDIST_NAME }}
+        env:
+          CIBW_BUILD: "cp314-* cp314t-*"
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+
+      - name: Build wheels for CPython 3.13
+        uses: pypa/cibuildwheel@e090b81e30c4d855ea63bf4b6e59204c09a101ae  # v4.2.1
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.SDIST_NAME }}
+        env:
+          CIBW_BUILD: "cp313-*"
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+
+      - name: Build wheels for CPython 3.12
+        uses: pypa/cibuildwheel@e090b81e30c4d855ea63bf4b6e59204c09a101ae  # v4.2.1
+        with:
+          package-dir: dist/${{ needs.build_sdist.outputs.SDIST_NAME }}
+        env:
+          CIBW_BUILD: "cp312-*"
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cibw-wheels-${{ runner.os }}-${{ matrix.cibw_archs }}
+          path: ./wheelhouse/*.whl
+          if-no-files-found: error

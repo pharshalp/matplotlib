@@ -1,51 +1,266 @@
 .. _developers-guide-index:
 
-############
-Contributing
-############
+##########
+Contribute
+##########
 
-Thank you for your interest in helping to improve Matplotlib! There are various
-ways to contribute to Matplotlib. All of them are super valuable but don't necessarily
-require writing code at all. For example:
+.. ifconfig:: releaselevel != 'dev'
 
-- contributing to the documentation
-- opening new issues for bugs
-- requesting new features
-- asking for clarification on things you find unclear
-- fixing bugs
+   .. important::
 
-If you have any questions on the
-process or how to fix something feel free to ask on `gitter
-<https://gitter.im/matplotlib/matplotlib>`_ for short questions and on
-`discourse <https://discourse.matplotlib.org>`_ for longer questions.
+      If you plan to contribute to Matplotlib, please read the
+      `development version <https://matplotlib.org/devdocs/devel/index.html>`_
+      of this document as it will have the most up to date installation
+      instructions, workflow process, and contributing guidelines.
 
-.. raw:: html
+:octicon:`heart;1em;sd-text-info` Thank you for your interest in helping to improve
+Matplotlib! :octicon:`heart;1em;sd-text-info`
 
-   <div style="margin: 2em 0;">
-     <a href="contributing.html#submitting-a-bug-report"><span class="mpl-button">Report a bug</span></a>
-     <a href="contributing.html#request-a-new-feature"><span class="mpl-button">Request a feature</span></a>
-     <a href="contributing.html#contributing-code"><span class="mpl-button">Contribute code</span></a>
-     <a href="contributing.html#contributing-documentation"><span class="mpl-button">Write documentation</span></a>
-   </div>
+This project is a community effort, and everyone is welcome to contribute. Everyone
+within the community is expected to abide by our :ref:`code of conduct <code_of_conduct>`.
 
-.. toctree::
-   :maxdepth: 2
+There are various ways to contribute, such as optimizing and refactoring code,
+detailing unclear documentation and writing new examples, helping the community,
+reporting and fixing bugs, requesting and implementing new features...
 
-   contributing.rst
-   triage.rst
-   development_setup.rst
-   testing.rst
-   documenting_mpl.rst
-   style_guide.rst
-   gitwash/index.rst
-   coding_guide.rst
-   release_guide.rst
-   dependencies.rst
-   min_dep_policy.rst
-   MEP/index
+.. _submitting-a-bug-report:
+.. _request-a-new-feature:
+
+GitHub issue tracker
+====================
+
+The `issue tracker <https://github.com/matplotlib/matplotlib/issues>`_ serves as the
+centralized location for making feature requests, reporting bugs, identifying major
+projects to work on, and discussing priorities.
+
+We have preloaded the issue creation page with markdown forms requesting the information
+we need to triage issues and we welcome you to add any additional information or
+context that may be necessary for resolving the issue:
+
+.. grid:: 1 1 2 2
+
+   .. grid-item-card::
+      :class-header: sd-fs-5
+      :class-body: sd-d-flex-column
+
+      :octicon:`bug;1em;sd-text-info` **Submit a bug report**
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      Thank you for your help in keeping bug reports targeted and descriptive.
+
+      .. button-link:: https://github.com/matplotlib/matplotlib/issues/new/choose
+         :expand:
+         :color: primary
+
+         Report a bug
+
+   .. grid-item-card::
+      :class-header: sd-fs-5
+      :class-body: sd-d-flex-column
+
+      :octicon:`light-bulb;1em;sd-text-info` **Request a new feature**
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      Thank you for your help in keeping feature requests well defined and tightly scoped.
+
+      .. button-link:: https://github.com/matplotlib/matplotlib/issues/new/choose
+         :expand:
+         :color: primary
+
+         Request a feature
+
+Since Matplotlib is an open source project with limited resources, we encourage users
+to also :ref:`participate <contribute_code>` in fixing bugs and implementing new
+features.
+
+Contributing guide
+==================
+
+We welcome you to get more involved with the Matplotlib project! If you are new
+to contributing, we recommend that you first read our
+:ref:`contributing guide<contributing>`:
 
 .. toctree::
    :hidden:
 
-   license.rst
-   color_changes
+   contribute
+
+.. grid:: 1 1 2 2
+   :class-row: sd-fs-5 sd-align-minor-center
+
+   .. grid-item::
+
+      .. grid:: 1
+         :gutter: 1
+
+         .. grid-item-card::
+            :link: contribute_code
+            :link-type: ref
+            :class-card: sd-shadow-none
+            :class-body: sd-text-{primary}
+
+            :octicon:`code;1em;sd-text-info` Contribute code
+
+         .. grid-item-card::
+            :link: contribute_documentation
+            :link-type: ref
+            :class-card: sd-shadow-none
+            :class-body: sd-text-{primary}
+
+            :octicon:`note;1em;sd-text-info` Write documentation
+
+         .. grid-item-card::
+            :link: contribute_triage
+            :link-type: ref
+            :class-card: sd-shadow-none
+            :class-body: sd-text-{primary}
+
+            :octicon:`issue-opened;1em;sd-text-info` Triage issues
+
+         .. grid-item-card::
+            :link: other_ways_to_contribute
+            :link-type: ref
+            :class-card: sd-shadow-none
+            :class-body: sd-text-{primary}
+
+            :octicon:`globe;1em;sd-text-info` Build community
+
+   .. grid-item::
+
+      .. grid:: 1
+         :gutter: 1
+
+         .. grid-item::
+
+            :octicon:`info;1em;sd-text-info` :ref:`Is this my first contribution? <new_contributors>`
+
+         .. grid-item::
+
+            :octicon:`question;1em;sd-text-info` :ref:`Where do I ask questions? <get_connected>`
+
+         .. grid-item::
+
+            :octicon:`git-pull-request;1em;sd-text-info` :ref:`How do I choose an issue? <managing_issues_prs>`
+
+         .. grid-item::
+
+            :octicon:`codespaces;1em;sd-text-info` :ref:`How do I start a pull request? <how-to-pull-request>`
+
+
+.. _development_environment:
+
+Development workflow
+====================
+
+If you are contributing code or documentation, please follow our guide for setting up
+and managing a development environment and workflow:
+
+.. grid:: 1 1 2 2
+
+   .. grid-item-card::
+      :shadow: none
+
+      **Build and install from source**
+      ^^^
+      .. rst-class:: section-toc no-caption-toc
+      .. toctree::
+         :maxdepth: 4
+
+         development_setup
+
+
+   .. grid-item-card::
+      :shadow: none
+
+      **Development workflow**
+      ^^^^
+
+      .. toctree::
+         :maxdepth: 2
+
+         development_workflow
+
+      .. toctree::
+         :maxdepth: 1
+
+         troubleshooting.rst
+
+
+.. _contribution_guideline:
+
+Policies and guidelines
+=======================
+
+.. admonition:: AI Usage
+
+   AI may be used responsibly as a supportive tool, but we expect authentic
+   contributions. For guidance, see our :ref:`AI policy <generative_ai>`.
+
+These policies and guidelines help us maintain consistency in the various types of
+maintenance work. If you are writing code or documentation, following these policies
+helps maintainers more easily review your work. If you are helping triage, community
+manage, or release manage, these guidelines describe how our current process works.
+
+.. grid:: 1 1 2 2
+   :class-row: sf-fs-1
+   :gutter: 2
+
+   .. grid-item-card::
+      :shadow: none
+
+      **Code**
+      ^^^
+
+      .. rst-class:: no-caption-toc
+      .. toctree::
+         :maxdepth: 1
+         :caption: Code
+
+         coding_guide
+         api_changes
+         testing
+
+   .. grid-item-card::
+      :shadow: none
+
+      **Documentation**
+      ^^^
+
+      .. rst-class:: no-caption-toc
+      .. toctree::
+         :maxdepth: 1
+         :caption: Documentation
+
+         document
+         style_guide
+         tag_guidelines
+
+   .. grid-item-card::
+      :shadow: none
+
+      **Triage And Review**
+      ^^^
+
+      .. rst-class:: no-caption-toc
+      .. toctree::
+         :maxdepth: 1
+         :caption: Triage and Review
+
+         triage
+         pr_guide
+
+   .. grid-item-card::
+      :shadow: none
+
+      **Maintenance**
+      ^^^
+
+      .. rst-class:: no-caption-toc
+      .. toctree::
+         :maxdepth: 1
+         :caption: Maintenance
+
+         release_guide
+         communication_guide
+         min_dep_policy
+         MEP/index

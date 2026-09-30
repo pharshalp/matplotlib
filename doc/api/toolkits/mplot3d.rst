@@ -12,7 +12,7 @@ and feel as regular 2D plots.  Not the fastest or most feature complete 3D
 library out there, but it ships with Matplotlib and thus may be a lighter
 weight solution for some use cases.
 
-See the :doc:`mplot3d tutorial </tutorials/toolkits/mplot3d>` for
+See the :ref:`mplot3d tutorial <mplot3d>` for
 more information.
 
 .. image:: /_static/demo_mplot3d.png
@@ -20,13 +20,16 @@ more information.
 
 The interactive backends also provide the ability to rotate and zoom the 3D
 scene.  One can rotate the 3D scene by simply clicking-and-dragging the scene.
-Zooming is done by right-clicking the scene and dragging the mouse up and down
-(unlike 2D plots, the toolbar zoom button is not used).
+Panning is done by clicking the middle mouse button, and zooming is done by
+right-clicking the scene and dragging the mouse up and down. Unlike 2D plots,
+the toolbar pan and zoom buttons are not used.
 
 .. toctree::
    :maxdepth: 2
 
    mplot3d/faq.rst
+   mplot3d/view_angles.rst
+   mplot3d/axes3d.rst
 
 .. note::
    `.pyplot` cannot be used to add content to 3D plots, because its function
@@ -49,11 +52,8 @@ Zooming is done by right-clicking the scene and dragging the mouse up and down
    Please report any functions that do not behave as expected as a bug.
    In addition, help and patches would be greatly appreciated!
 
-.. autosummary::
-   :toctree: ../_as_gen
-   :template: autosummary.rst
 
-   axes3d.Axes3D
+`axes3d.Axes3D` (fig[, rect, elev, azim, roll, ...])    3D Axes object.
 
 
 .. module:: mpl_toolkits.mplot3d.axis3d
@@ -63,7 +63,7 @@ Zooming is done by right-clicking the scene and dragging the mouse up and down
 ===================================
 
 .. note::
-   See :attr:`mpl_toolkits.mplot3d.axis3d._axinfo` for a dictionary containing
+   See :attr:`!mpl_toolkits.mplot3d.axis3d._axinfo` for a dictionary containing
    constants that may be modified for controlling the look and feel
    of mplot3d axes (e.g., label spacing, font colors and panel colors).
    Historically, axis3d has suffered from having hard-coded constants
@@ -118,12 +118,6 @@ Zooming is done by right-clicking the scene and dragging the mouse up and down
    :template: autosummary.rst
 
    proj3d.inv_transform
-   proj3d.persp_transformation
-   proj3d.proj_points
-   proj3d.proj_trans_points
    proj3d.proj_transform
    proj3d.proj_transform_clip
-   proj3d.rot_x
-   proj3d.transform
-   proj3d.view_transformation
    proj3d.world_transformation

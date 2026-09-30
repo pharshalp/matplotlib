@@ -41,13 +41,15 @@ OTHER DEALINGS IN THE SOFTWARE.
 __version__ = '1.0.10'
 __license__ = __doc__
 
+from ast import literal_eval
+
 import copy
 import datetime
 import logging
 from numbers import Integral, Real
 
 from matplotlib import _api, colors as mcolors
-from ..qt_compat import QtGui, QtWidgets, QtCore, _enum, _to_int
+from matplotlib.backends.qt_compat import _to_int, QtGui, QtWidgets, QtCore
 
 _log = logging.getLogger(__name__)
 
@@ -70,7 +72,7 @@ class ColorButton(QtWidgets.QPushButton):
     def choose_color(self):
         color = QtWidgets.QColorDialog.getColor(
             self._color, self.parentWidget(), "",
-            QtWidgets.QColorDialog.ShowAlphaChannel)
+            QtWidgets.QColorDialog.ColorDialogOption.ShowAlphaChannel)
         if color.isValid():
             self.set_color(color)
 
@@ -203,7 +205,7 @@ class FontLayout(QtWidgets.QGridLayout):
 def is_edit_valid(edit):
     text = edit.text()
     state = edit.validator().validate(text, 0)[0]
-    return state == _enum("QtGui.QDoubleValidator.State").Acceptable
+    return state == QtGui.QDoubleValidator.State.Acceptable
 
 
 class FormWidget(QtWidgets.QWidget):
@@ -350,7 +352,7 @@ class FormWidget(QtWidgets.QWidget):
                 else:
                     value = date_.toPython()
             else:
-                value = eval(str(field.text()))
+                value = literal_eval(str(field.text()))
             valuelist.append(value)
         return valuelist
 
@@ -441,15 +443,13 @@ class FormDialog(QtWidgets.QDialog):
         # Button box
         self.bbox = bbox = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton(
-                _to_int(
-                    _enum("QtWidgets.QDialogButtonBox.StandardButton").Ok) |
-                _to_int(
-                    _enum("QtWidgets.QDialogButtonBox.StandardButton").Cancel)
+                    _to_int(QtWidgets.QDialogButtonBox.StandardButton.Ok) |
+                    _to_int(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
             ))
         self.formwidget.update_buttons.connect(self.update_buttons)
         if self.apply_callback is not None:
             apply_btn = bbox.addButton(
-                _enum("QtWidgets.QDialogButtonBox.StandardButton").Apply)
+                QtWidgets.QDialogButtonBox.StandardButton.Apply)
             apply_btn.clicked.connect(self.apply)
 
         bbox.accepted.connect(self.accept)
@@ -474,7 +474,7 @@ class FormDialog(QtWidgets.QDialog):
                 valid = False
         for btn_type in ["Ok", "Apply"]:
             btn = self.bbox.button(
-                getattr(_enum("QtWidgets.QDialogButtonBox.StandardButton"),
+                getattr(QtWidgets.QDialogButtonBox.StandardButton,
                         btn_type))
             if btn is not None:
                 btn.setEnabled(valid)
@@ -498,8 +498,7 @@ class FormDialog(QtWidgets.QDialog):
 
 def fedit(data, title="", comment="", icon=None, parent=None, apply=None):
     """
-    Create form dialog and return result
-    (if Cancel button is pressed, return None)
+    Create form dialog
 
     data: datalist, datagroup
     title: str
@@ -517,7 +516,7 @@ def fedit(data, title="", comment="", icon=None, parent=None, apply=None):
        box) for each member of a datagroup inside a datagroup
 
     Supported types for field_value:
-      - int, float, str, unicode, bool
+      - int, float, str, bool
       - colors: in Qt-compatible text form, i.e. in hex format or name
                 (red, ...) (automatically detected from a string)
       - list/tuple:
@@ -540,6 +539,8 @@ def fedit(data, title="", comment="", icon=None, parent=None, apply=None):
 
 
 if __name__ == "__main__":
+
+    _app = QtWidgets.QApplication([])
 
     def create_datalist_example():
         return [('str', 'this is a string'),
@@ -568,18 +569,24 @@ if __name__ == "__main__":
 
     def apply_test(data):
         print("data:", data)
-    print("result:", fedit(datalist, title="Example",
-                           comment="This is just an <b>example</b>.",
-                           apply=apply_test))
+    fedit(datalist, title="Example",
+          comment="This is just an <b>example</b>.",
+          apply=apply_test)
+
+    _app.exec()
 
     # --------- datagroup example
     datagroup = create_datagroup_example()
-    print("result:", fedit(datagroup, "Global title"))
+    fedit(datagroup, "Global title",
+          apply=apply_test)
+    _app.exec()
 
     # --------- datagroup inside a datagroup example
     datalist = create_datalist_example()
     datagroup = create_datagroup_example()
-    print("result:", fedit(((datagroup, "Title 1", "Tab 1 comment"),
-                            (datalist, "Title 2", "Tab 2 comment"),
-                            (datalist, "Title 3", "Tab 3 comment")),
-                           "Global title"))
+    fedit(((datagroup, "Title 1", "Tab 1 comment"),
+           (datalist, "Title 2", "Tab 2 comment"),
+           (datalist, "Title 3", "Tab 3 comment")),
+          "Global title",
+          apply=apply_test)
+    _app.exec()

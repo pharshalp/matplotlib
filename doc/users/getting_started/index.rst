@@ -4,26 +4,7 @@ Getting started
 Installation quick-start
 ------------------------
 
-.. container:: twocol
-
-    .. container::
-
-        Install using `pip <https://pypi.org/project/matplotlib>`__:
-
-        .. code-block:: bash
-
-            pip install matplotlib
-
-    .. container::
-
-        Install using `conda <https://docs.continuum.io/anaconda/>`__:
-
-        .. code-block:: bash
-
-            conda install matplotlib
-
-Further details are available in the :doc:`Installation Guide </users/installing/index>`.
-
+.. include:: /install/quick_install.inc.rst
 
 Draw a first plot
 -----------------
@@ -51,5 +32,5 @@ Where to go next
 
 - Check out :doc:`Plot types </plot_types/index>` to get an overview of the
   types of plots you can create with Matplotlib.
-- Learn Matplotlib from the ground up in the
-  :doc:`Quick-start guide </tutorials/introductory/quick_start>`.
+- Learn Matplotlib from the ground up in the :ref:`Quick-start guide
+  <quick_start>`.

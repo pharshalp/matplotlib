@@ -1,13 +1,27 @@
 /* -*- mode: c++; c-basic-offset: 4 -*- */
 
 /* A python interface to FreeType */
+#pragma once
+
 #ifndef MPL_FT2FONT_H
 #define MPL_FT2FONT_H
+
+#include <pybind11/pybind11.h>
+#include <pybind11/numpy.h>
+
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
-#include <stdint.h>
 
 extern "C" {
 #include <ft2build.h>
+#include FT_BITMAP_H
 #include FT_FREETYPE_H
 #include FT_GLYPH_H
 #include FT_OUTLINE_H
@@ -16,27 +30,50 @@ extern "C" {
 #include FT_TRUETYPE_TABLES_H
 }
 
-#define PY_SSIZE_T_CLEAN
-#include <Python.h>
+#include <raqm.h>
 
-/*
- By definition, FT_FIXED as 2 16bit values stored in a single long.
- */
+namespace py = pybind11;
+
+// By definition, FT_FIXED as 2 16bit values stored in a single long.
 #define FIXED_MAJOR(val) (signed short)((val & 0xffff0000) >> 16)
 #define FIXED_MINOR(val) (unsigned short)(val & 0xffff)
+
+// Error handling (error codes are loaded as described in fterror.h).
+inline char const* ft_error_string(FT_Error error) {
+#undef __FTERRORS_H__
+#define FT_ERROR_START_LIST     switch (error) {
+#define FT_ERRORDEF( e, v, s )    case v: return s;
+#define FT_ERROR_END_LIST         default: return "unknown error"; }
+#include FT_ERRORS_H
+}
+
+// No more than 16 hex digits + "0x" + null byte for a 64-bit int error.
+#define THROW_FT_ERROR(name, err) { \
+    std::string path{__FILE__}; \
+    char buf[20] = {0}; \
+    snprintf(buf, sizeof buf, "%#04x", err); \
+    throw std::runtime_error{ \
+        name " (" \
+        + path.substr(path.find_last_of("/\\") + 1) \
+        + " line " + std::to_string(__LINE__) + ") failed with error " \
+        + std::string{buf} + ": " + std::string{ft_error_string(err)}}; \
+} (void)0
+
+#define FT_CHECK(func, ...) { \
+    if (auto const& error_ = func(__VA_ARGS__)) { \
+        THROW_FT_ERROR(#func, error_); \
+    } \
+} (void)0
 
 // the FreeType string rendered into a width, height buffer
 class FT2Image
 {
   public:
-    FT2Image();
     FT2Image(unsigned long width, unsigned long height);
     virtual ~FT2Image();
 
     void resize(long width, long height);
     void draw_bitmap(FT_Bitmap *bitmap, FT_Int x, FT_Int y);
-    void write_bitmap(FILE *fp) const;
-    void draw_rect(unsigned long x0, unsigned long y0, unsigned long x1, unsigned long y1);
     void draw_rect_filled(unsigned long x0, unsigned long y0, unsigned long x1, unsigned long y1);
 
     unsigned char *get_buffer()
@@ -53,7 +90,6 @@ class FT2Image
     }
 
   private:
-    bool m_dirty;
     unsigned char *m_buffer;
     unsigned long m_width;
     unsigned long m_height;
@@ -63,69 +99,141 @@ class FT2Image
     FT2Image &operator=(const FT2Image &);
 };
 
-extern FT_Library _ft2Library;
-
 class FT2Font
 {
-
   public:
-    FT2Font(FT_Open_Args &open_args, long hinting_factor);
+    using LanguageRange = std::tuple<std::string, int, int>;
+    using LanguageType = std::optional<std::vector<LanguageRange>>;
+    struct GlyphDeleter {
+        void operator()(FT_Glyph glyph) const { FT_Done_Glyph(glyph); }
+    };
+    using GlyphPtr = std::unique_ptr<std::remove_pointer_t<FT_Glyph>, GlyphDeleter>;
+
+    FT2Font(std::vector<FT2Font *> &fallback_list, bool warn_if_used);
     virtual ~FT2Font();
+    void open(FT_Library ft2Library, FT_Open_Args &open_args, FT_Long face_index);
+    void close();
     void clear();
     void set_size(double ptsize, double dpi);
+    void _set_transform(
+        std::array<std::array<FT_Fixed, 2>, 2> matrix, std::array<FT_Fixed, 2> delta);
     void set_charmap(int i);
     void select_charmap(unsigned long i);
-    void set_text(
-        size_t N, uint32_t *codepoints, double angle, FT_Int32 flags, std::vector<double> &xys);
-    int get_kerning(FT_UInt left, FT_UInt right, FT_UInt mode);
+    std::vector<raqm_glyph_t> layout(std::u32string_view text, FT_Int32 flags,
+                                     std::optional<std::vector<std::string>> features,
+                                     LanguageType languages,
+                                     std::set<FT_String*>& glyph_seen_fonts);
+    void set_text(std::u32string_view codepoints, double angle, FT_Int32 flags,
+                  std::optional<std::vector<std::string>> features,
+                  LanguageType languages, std::vector<double> &xys);
+    int get_kerning(FT_UInt left, FT_UInt right, FT_Kerning_Mode mode);
     void set_kerning_factor(int factor);
-    void load_char(long charcode, FT_Int32 flags);
+    void load_char(long charcode, FT_Int32 flags, FT2Font *&ft_object, bool fallback);
+    bool load_char_with_fallback(FT2Font *&ft_object_with_glyph,
+                                 FT_UInt &final_glyph_index,
+                                 std::vector<FT_Glyph> &parent_glyphs,
+                                 std::unordered_map<long, FT2Font *> &parent_char_to_font,
+                                 long charcode,
+                                 FT_Int32 flags,
+                                 FT_Error &charcode_error,
+                                 FT_Error &glyph_error,
+                                 std::set<FT_String*> &glyph_seen_fonts);
     void load_glyph(FT_UInt glyph_index, FT_Int32 flags);
-    void get_width_height(long *width, long *height);
-    void get_bitmap_offset(long *x, long *y);
+    void load_glyph_copy(FT_UInt glyph_index, FT_Int32 flags,
+                         GlyphPtr &glyph, FT_Fixed &linear_hori_advance);
+    void load_glyph_cached(FT_UInt glyph_index, FT_Int32 flags,
+                           FT_Fixed &linear_hori_advance);
+    GlyphPtr render_glyph(FT_UInt glyph_index, FT_Int32 flags, FT_Render_Mode render_mode);
+    std::tuple<long, long> get_width_height();
+    std::tuple<long, long> get_bitmap_offset();
     long get_descent();
-    // TODO: Since we know the size of the array upfront, we probably don't
-    // need to dynamically allocate like this
-    void get_xys(bool antialiased, std::vector<double> &xys);
     void draw_glyphs_to_bitmap(bool antialiased);
-    void draw_glyph_to_bitmap(FT2Image &im, int x, int y, size_t glyphInd, bool antialiased);
-    void get_glyph_name(unsigned int glyph_number, char *buffer);
+    void draw_glyph_to_bitmap(
+        py::array_t<uint8_t, py::array::c_style> im,
+        int x, int y, size_t glyphInd, bool antialiased);
+    std::string get_glyph_name(unsigned int glyph_number);
     long get_name_index(char *name);
-    PyObject* get_path();
+    FT_UInt get_char_index(FT_ULong charcode, bool fallback);
+    void get_path(std::vector<double> &vertices, std::vector<unsigned char> &codes);
+    bool get_char_fallback_index(FT_ULong charcode, int& index) const;
 
-    FT_Face &get_face()
+    FT_Face const &get_face() const
     {
         return face;
     }
-    FT2Image &get_image()
+
+    py::array_t<uint8_t, py::array::c_style> &get_image()
     {
         return image;
     }
-    FT_Glyph &get_last_glyph()
+    std::vector<FT_Glyph> &get_glyphs()
+    {
+        return glyphs;
+    }
+    FT_Glyph const &get_last_glyph() const
     {
         return glyphs.back();
     }
-    size_t get_last_glyph_index()
+    size_t get_last_glyph_index() const
     {
         return glyphs.size() - 1;
     }
-    size_t get_num_glyphs()
+    size_t get_num_glyphs() const
     {
         return glyphs.size();
     }
-    long get_hinting_factor()
+    FT_Bool has_kerning() const
     {
-        return hinting_factor;
+        return FT_HAS_KERNING(face);
     }
 
+  protected:
+    virtual void ft_glyph_warn(FT_ULong charcode, std::set<FT_String*> family_names) = 0;
   private:
-    FT2Image image;
+    // Everything affecting a loaded outline, but not the translation, which is
+    // applied when rasterizing.
+    using GlyphCacheKey = std::tuple<FT_UInt, FT_Int32, FT_F26Dot6, FT_UInt,
+                                     FT_Fixed, FT_Fixed, FT_Fixed, FT_Fixed>;
+    static constexpr size_t glyph_cache_max = 1024;
+    struct CachedGlyph {
+        GlyphPtr glyph;
+        FT_Fixed linear_hori_advance;  // Unaffected by the transform.
+    };
+    // The result is only valid until the next call.
+    CachedGlyph const *cache_glyph(FT_UInt glyph_index, FT_Int32 flags);
+
+    // The size and charmap of one face.  The charmap is a counter, as FreeType
+    // offers no cheap way to identify the selected one.
+    using FaceState = std::tuple<FT_F26Dot6, FT_UInt, unsigned long>;
+    std::vector<FaceState> shaping_state() const;
+
+    // Everything that affects the shaped output of layout().
+    using LayoutCacheKey = std::tuple<std::u32string, FT_Int32,
+                                      std::optional<std::vector<std::string>>,
+                                      LanguageType, std::vector<FaceState>,
+                                      FT_Fixed, FT_Fixed, FT_Fixed, FT_Fixed>;
+    struct LayoutCacheEntry {
+        std::vector<raqm_glyph_t> glyphs;
+        std::set<FT_String *> seen_fonts;
+    };
+    static constexpr size_t layout_cache_max = 1024;
+    std::map<LayoutCacheKey, LayoutCacheEntry> layout_cache;
+
+    bool warn_if_used;
+    py::array_t<uint8_t, py::array::c_style> image;
     FT_Face face;
     FT_Vector pen;    /* untransformed origin  */
     std::vector<FT_Glyph> glyphs;
+    std::map<GlyphCacheKey, CachedGlyph> glyph_cache;
+    FT_F26Dot6 char_size;
+    FT_UInt char_dpi;
+    FT_Matrix glyph_matrix;
+    FT_Vector glyph_delta;
+    unsigned long charmap_generation;
+    std::vector<FT2Font *> fallbacks;
+    std::unordered_map<long, FT2Font *> char_to_font;
     FT_BBox bbox;
     FT_Pos advance;
-    long hinting_factor;
     int kerning_factor;
 
     // prevent copying

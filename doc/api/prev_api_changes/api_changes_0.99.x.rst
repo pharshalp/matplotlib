@@ -21,8 +21,8 @@ Changes beyond 0.99.x
     on or off, and applies it.
 
   + :meth:`matplotlib.axes.Axes.margins` sets margins used to
-    autoscale the :attr:`matplotlib.axes.Axes.viewLim` based on
-    the :attr:`matplotlib.axes.Axes.dataLim`.
+    autoscale the ``matplotlib.axes.Axes.viewLim`` based on
+    the ``matplotlib.axes.Axes.dataLim``.
 
   + :meth:`matplotlib.axes.Axes.locator_params` allows one to
     adjust axes locator parameters such as *nbins*.
@@ -67,7 +67,7 @@ Changes beyond 0.99.x
   required by the experimental traited config and are somewhat out of
   date. If needed, install them independently.
 
-.. _configobj: http://www.voidspace.org.uk/python/configobj.html
+.. _configobj: https://configobj.readthedocs.io/en/latest/
 .. _`enthought.traits`: http://code.enthought.com/pages/traits.html
 
 * The new rc parameter ``savefig.extension`` sets the filename extension

@@ -1,7 +1,9 @@
 import datetime
 from io import BytesIO
 import os
+from pathlib import Path
 import shutil
+import string
 
 import numpy as np
 from packaging.version import parse as parse_version
@@ -9,24 +11,19 @@ import pytest
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib.font_manager import FontProperties, findfont
 from matplotlib.testing import _has_tex_package, _check_for_pgf
-from matplotlib.testing.compare import compare_images, ImageComparisonFailure
-from matplotlib.backends.backend_pgf import PdfPages, common_texification
-from matplotlib.testing.decorators import (_image_directories,
-                                           check_figures_equal,
-                                           image_comparison)
+from matplotlib.testing.exceptions import ImageComparisonFailure
+from matplotlib.testing.compare import compare_images
+from matplotlib.backends.backend_pgf import _metadata_to_str, PdfPages
+from matplotlib.testing.decorators import (
+    _image_directories, check_figures_equal, image_comparison)
+from matplotlib.testing._markers import (
+    needs_ghostscript, needs_pgf_lualatex, needs_pgf_pdflatex,
+    needs_pgf_xelatex)
+
 
 baseline_dir, result_dir = _image_directories(lambda: 'dummy func')
-
-needs_xelatex = pytest.mark.skipif(not _check_for_pgf('xelatex'),
-                                   reason='xelatex + pgf is required')
-needs_pdflatex = pytest.mark.skipif(not _check_for_pgf('pdflatex'),
-                                    reason='pdflatex + pgf is required')
-needs_lualatex = pytest.mark.skipif(not _check_for_pgf('lualatex'),
-                                    reason='lualatex + pgf is required')
-needs_ghostscript = pytest.mark.skipif(
-    "eps" not in mpl.testing.compare.converter,
-    reason="This test needs a ghostscript installation")
 
 
 def compare_figure(fname, savefig_kwargs={}, tol=0):
@@ -38,6 +35,39 @@ def compare_figure(fname, savefig_kwargs={}, tol=0):
     err = compare_images(expected, actual, tol=tol)
     if err:
         raise ImageComparisonFailure(err)
+
+
+@pytest.mark.parametrize("key, value, expected_str", [
+    ("Author", "me", "Author={me}"),
+    ("ModDate",
+     datetime.datetime(1968, 8, 1, tzinfo=datetime.timezone(datetime.timedelta(0))),
+     "ModDate={D:19680801000000Z}"),
+])
+def test__metadata_to_str(key, value, expected_str):
+    assert _metadata_to_str(key, value) == expected_str
+
+
+@pytest.mark.parametrize("value", [
+    r"Backslashes, e.g. in \commands",
+    r"funny braces {}",
+    r"and square brackets]",
+])
+def test__metadata_to_str_error(value):
+    with pytest.raises(ValueError, match="value must not contain the chars"):
+        _metadata_to_str("Title", value)
+
+
+@needs_pgf_xelatex
+@needs_ghostscript
+@pytest.mark.backend('pgf')
+def test_tex_special_chars(tmp_path):
+    fig = plt.figure()
+    fig.text(.5, .5, "%_^ $a_b^c$")
+    buf = BytesIO()
+    fig.savefig(buf, format="png", backend="pgf")
+    buf.seek(0)
+    t = plt.imread(buf)
+    assert not (t == 1).all()  # The leading "%" didn't eat up everything.
 
 
 def create_figure():
@@ -57,28 +87,19 @@ def create_figure():
 
     # text and typesetting
     plt.plot([0.9], [0.5], "ro", markersize=3)
-    plt.text(0.9, 0.5, 'unicode (ü, °, µ) and math ($\\mu_i = x_i^2$)',
+    plt.text(0.9, 0.5, 'unicode (ü, °, \N{Section Sign}) and math ($\\mu_i = x_i^2$)',
              ha='right', fontsize=20)
     plt.ylabel('sans-serif, blue, $\\frac{\\sqrt{x}}{y^2}$..',
                family='sans-serif', color='blue')
+    plt.text(1, 1, 'should be clipped as default clip_box is Axes bbox',
+             fontsize=20, clip_on=True)
 
     plt.xlim(0, 1)
     plt.ylim(0, 1)
 
 
-@pytest.mark.parametrize('plain_text, escaped_text', [
-    (r'quad_sum: $\sum x_i^2$', r'quad\_sum: \(\displaystyle \sum x_i^2\)'),
-    (r'no \$splits \$ here', r'no \$splits \$ here'),
-    ('with_underscores', r'with\_underscores'),
-    ('% not a comment', r'\% not a comment'),
-    ('^not', r'\^not'),
-])
-def test_common_texification(plain_text, escaped_text):
-    assert common_texification(plain_text) == escaped_text
-
-
 # test compiling a figure to pdf with xelatex
-@needs_xelatex
+@needs_pgf_xelatex
 @pytest.mark.backend('pgf')
 @image_comparison(['pgf_xelatex.pdf'], style='default')
 def test_xelatex():
@@ -96,16 +117,13 @@ except mpl.ExecutableNotFoundError:
 
 
 # test compiling a figure to pdf with pdflatex
-@needs_pdflatex
+@needs_pgf_pdflatex
+@pytest.mark.skipif(not _has_tex_package('type1ec'), reason='needs type1ec.sty')
 @pytest.mark.skipif(not _has_tex_package('ucs'), reason='needs ucs.sty')
 @pytest.mark.backend('pgf')
 @image_comparison(['pgf_pdflatex.pdf'], style='default',
-                  tol=11.7 if _old_gs_version else 0)
+                  tol=11.71 if _old_gs_version else 0)
 def test_pdflatex():
-    if os.environ.get('APPVEYOR'):
-        pytest.xfail("pdflatex test does not work on appveyor due to missing "
-                     "LaTeX fonts")
-
     rc_pdflatex = {'font.family': 'serif',
                    'pgf.rcfonts': False,
                    'pgf.texsystem': 'pdflatex',
@@ -116,8 +134,8 @@ def test_pdflatex():
 
 
 # test updating the rc parameters for each figure
-@needs_xelatex
-@needs_pdflatex
+@needs_pgf_xelatex
+@needs_pgf_pdflatex
 @mpl.style.context('default')
 @pytest.mark.backend('pgf')
 def test_rcupdate():
@@ -130,6 +148,8 @@ def test_rcupdate():
                {'font.family': 'monospace',
                 'font.size': 10,
                 'figure.subplot.left': .1,
+                'hatch.color': 'orange',
+                'hatch.linewidth': 2,
                 'lines.markersize': 20,
                 'pgf.rcfonts': False,
                 'pgf.texsystem': 'pdflatex',
@@ -148,7 +168,7 @@ def test_rcupdate():
 
 
 # test backend-side clipping, since large numbers are not supported by TeX
-@needs_xelatex
+@needs_pgf_xelatex
 @mpl.style.context('default')
 @pytest.mark.backend('pgf')
 def test_pathclip():
@@ -168,7 +188,7 @@ def test_pathclip():
 
 
 # test mixed mode rendering
-@needs_xelatex
+@needs_pgf_xelatex
 @pytest.mark.backend('pgf')
 @image_comparison(['pgf_mixedmode.pdf'], style='default')
 def test_mixedmode():
@@ -178,7 +198,7 @@ def test_mixedmode():
 
 
 # test bbox_inches clipping
-@needs_xelatex
+@needs_pgf_xelatex
 @mpl.style.context('default')
 @pytest.mark.backend('pgf')
 def test_bbox_inches():
@@ -195,9 +215,9 @@ def test_bbox_inches():
 @mpl.style.context('default')
 @pytest.mark.backend('pgf')
 @pytest.mark.parametrize('system', [
-    pytest.param('lualatex', marks=[needs_lualatex]),
-    pytest.param('pdflatex', marks=[needs_pdflatex]),
-    pytest.param('xelatex', marks=[needs_xelatex]),
+    pytest.param('lualatex', marks=[needs_pgf_lualatex]),
+    pytest.param('pdflatex', marks=[needs_pgf_pdflatex]),
+    pytest.param('xelatex', marks=[needs_pgf_xelatex]),
 ])
 def test_pdf_pages(system):
     rc_pdflatex = {
@@ -237,9 +257,9 @@ def test_pdf_pages(system):
 @mpl.style.context('default')
 @pytest.mark.backend('pgf')
 @pytest.mark.parametrize('system', [
-    pytest.param('lualatex', marks=[needs_lualatex]),
-    pytest.param('pdflatex', marks=[needs_pdflatex]),
-    pytest.param('xelatex', marks=[needs_xelatex]),
+    pytest.param('lualatex', marks=[needs_pgf_lualatex]),
+    pytest.param('pdflatex', marks=[needs_pgf_pdflatex]),
+    pytest.param('xelatex', marks=[needs_pgf_xelatex]),
 ])
 def test_pdf_pages_metadata_check(monkeypatch, system):
     # Basically the same as test_pdf_pages, but we keep it separate to leave
@@ -291,7 +311,22 @@ def test_pdf_pages_metadata_check(monkeypatch, system):
     }
 
 
-@needs_xelatex
+@needs_pgf_xelatex
+def test_multipage_keep_empty(tmp_path):
+    # An empty pdf deletes itself afterwards.
+    fn = tmp_path / "a.pdf"
+    with PdfPages(fn) as pdf:
+        pass
+    assert not fn.exists()
+
+    # Test pdf files with content, they should never be deleted.
+    fn = tmp_path / "b.pdf"
+    with PdfPages(fn) as pdf:
+        pdf.savefig(plt.figure())
+    assert fn.exists()
+
+
+@needs_pgf_xelatex
 def test_tex_restart_after_error():
     fig = plt.figure()
     fig.suptitle(r"\oops")
@@ -303,14 +338,14 @@ def test_tex_restart_after_error():
     fig.savefig(BytesIO(), format="pgf")
 
 
-@needs_xelatex
+@needs_pgf_xelatex
 def test_bbox_inches_tight():
     fig, ax = plt.subplots()
     ax.imshow([[0, 1], [2, 3]])
     fig.savefig(BytesIO(), format="pdf", backend="pgf", bbox_inches="tight")
 
 
-@needs_xelatex
+@needs_pgf_xelatex
 @needs_ghostscript
 def test_png_transparency():  # Actually, also just testing that png works.
     buf = BytesIO()
@@ -320,7 +355,24 @@ def test_png_transparency():  # Actually, also just testing that png works.
     assert (t[..., 3] == 0).all()  # fully transparent.
 
 
-@needs_xelatex
+@needs_pgf_xelatex
+@pytest.mark.backend('pgf')
+@image_comparison(['ttc_pgf.pdf'], style='mpl20')
+def test_ttc_output():
+    fp = FontProperties(family=['WenQuanYi Zen Hei'])
+    if Path(findfont(fp)).name != 'wqy-zenhei.ttc':
+        pytest.skip('Font wqy-zenhei.ttc may be missing')
+
+    fonts = {'sans-serif': 'WenQuanYi Zen Hei', 'monospace': 'WenQuanYi Zen Hei Mono'}
+    plt.rc('font', size=16, **fonts)
+
+    figs = plt.figure(figsize=(7, len(fonts) / 2)).subfigures(len(fonts))
+    for font, fig in zip(fonts.values(), figs):
+        fig.text(0.5, 0.5, f'{font}: {string.ascii_uppercase}', font=font,
+                 horizontalalignment='center', verticalalignment='center')
+
+
+@needs_pgf_xelatex
 def test_unknown_font(caplog):
     with caplog.at_level("WARNING"):
         mpl.rcParams["font.family"] = "this-font-does-not-exist"
@@ -366,3 +418,27 @@ def test_sketch_params():
     # \pgfdecoratecurrentpath must be after the path definition and before the
     # path is used (\pgfusepath)
     assert baseline in buf
+
+
+# test to make sure that the document font size is set consistently (see #26892)
+@needs_pgf_xelatex
+@pytest.mark.skipif(
+    not _has_tex_package('unicode-math'), reason='needs unicode-math.sty'
+)
+@pytest.mark.backend('pgf')
+@image_comparison(['pgf_document_font_size.pdf'], style='default', remove_text=True)
+def test_document_font_size():
+    mpl.rcParams.update({
+        'pgf.texsystem': 'xelatex',
+        'pgf.rcfonts': False,
+        'pgf.preamble': r'\usepackage{unicode-math}',
+    })
+    plt.figure()
+    plt.plot([],
+             label=r'$this is a very very very long math label a \times b + 10^{-3}$ '
+                   r'and some text'
+             )
+    plt.plot([],
+             label=r'\normalsize the document font size is \the\fontdimen6\font'
+             )
+    plt.legend()

@@ -55,7 +55,7 @@ Please pass capstyles ("miter", "round", "bevel") and joinstyles ("butt",
 
 Passing raw data to ``register_cmap()``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Passing raw data via parameters *data* and *lut* to `.register_cmap()` is
+Passing raw data via parameters *data* and *lut* to ``matplotlib.cm.register_cmap()`` is
 deprecated. Instead, explicitly create a `.LinearSegmentedColormap` and pass
 it via the *cmap* parameter:
 ``register_cmap(cmap=LinearSegmentedColormap(name, data, lut))``.
@@ -83,8 +83,8 @@ Passing both singular and plural *colors*, *linewidths*, *linestyles* to `.Axes.
 Passing e.g. both *linewidth* and *linewidths* will raise a TypeError in the
 future.
 
-Setting :rc:`text.latex.preamble` or :rc:`pdf.preamble` to non-strings
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Setting ``text.latex.preamble`` or ``pdf.preamble`` rcParams to non-strings
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 These rcParams should be set to string values.  Support for None (meaning the
 empty string) and lists of strings (implicitly joined with newlines) is
 deprecated.
@@ -232,7 +232,7 @@ Deprecated rcParams validators
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The following validators, defined in `.rcsetup`, are deprecated:
 ``validate_fontset``, ``validate_mathtext_default``, ``validate_alignment``,
-``validate_svg_fontset``, ``validate_pgf_texsystem``,
+``validate_svg_fonttype``, ``validate_pgf_texsystem``,
 ``validate_movie_frame_fmt``, ``validate_axis_locator``,
 ``validate_movie_html_fmt``, ``validate_grid_axis``,
 ``validate_axes_titlelocation``, ``validate_toolbar``,
@@ -273,13 +273,13 @@ mathtext glues
 The *copy* parameter of ``mathtext.Glue`` is deprecated (the underlying glue
 spec is now immutable).  ``mathtext.GlueSpec`` is deprecated.
 
-Signatures of `.Artist.draw` and `.Axes.draw`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The *inframe* parameter to `.Axes.draw` is deprecated.  Use
+Signatures of `.Artist.draw` and `matplotlib.axes.Axes.draw`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The *inframe* parameter to `matplotlib.axes.Axes.draw` is deprecated.  Use
 `.Axes.redraw_in_frame` instead.
 
-Not passing the *renderer* parameter to `.Axes.draw` is deprecated.  Use
-``axes.draw_artist(axes)`` instead.
+Not passing the *renderer* parameter to `matplotlib.axes.Axes.draw` is
+deprecated. Use ``axes.draw_artist(axes)`` instead.
 
 These changes make the signature of the ``draw`` (``artist.draw(renderer)``)
 method consistent across all artists; thus, additional parameters to
@@ -311,7 +311,7 @@ JPEG options
 ~~~~~~~~~~~~
 The *quality*, *optimize*, and *progressive* keyword arguments to
 `~.Figure.savefig`, which were only used when saving to JPEG, are deprecated.
-:rc:`savefig.jpeg_quality` is likewise deprecated.
+The ``savefig.jpeg_quality`` rcParam is likewise deprecated.
 
 Such options should now be directly passed to Pillow using
 ``savefig(..., pil_kwargs={"quality": ..., "optimize": ..., "progressive": ...})``.
@@ -328,7 +328,7 @@ are deprecated.  Panning and zooming are now implemented using the
 
 Passing None to various Axes subclass factories
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Support for passing ``None`` as base class to `.axes.subplot_class_factory`,
+Support for passing ``None`` as base class to ``axes.subplot_class_factory``,
 ``axes_grid1.parasite_axes.host_axes_class_factory``,
 ``axes_grid1.parasite_axes.host_subplot_class_factory``,
 ``axes_grid1.parasite_axes.parasite_axes_class_factory``, and
@@ -545,8 +545,8 @@ experimental and may change in the future.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ... is deprecated.
 
-`.epoch2num` and `.num2epoch` are deprecated
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``epoch2num`` and ``num2epoch`` are deprecated
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 These are unused and can be easily reproduced by other date tools.
 `.get_epoch` will return Matplotlib's epoch.
 

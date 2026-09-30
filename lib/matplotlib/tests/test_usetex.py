@@ -1,17 +1,19 @@
+import re
 from tempfile import TemporaryFile
 
 import numpy as np
+from packaging.version import parse as parse_version
 import pytest
 
 import matplotlib as mpl
 from matplotlib import dviread
 from matplotlib.testing import _has_tex_package
 from matplotlib.testing.decorators import check_figures_equal, image_comparison
+from matplotlib.testing._markers import needs_usetex
 import matplotlib.pyplot as plt
 
 
-if not mpl.checkdep_usetex(True):
-    pytestmark = pytest.mark.skip('Missing TeX of Ghostscript or dvipng')
+pytestmark = needs_usetex
 
 
 @image_comparison(
@@ -24,10 +26,11 @@ def test_usetex():
     kwargs = {"verticalalignment": "baseline", "size": 24,
               "bbox": dict(pad=0, edgecolor="k", facecolor="none")}
     ax.text(0.2, 0.7,
-            # the \LaTeX macro exercises character sizing and placement,
+            # The \LaTeX macro exercises character sizing and placement,
             # \left[ ... \right\} draw some variable-height characters,
-            # \sqrt and \frac draw horizontal rules, \mathrm changes the font
-            r'\LaTeX\ $\left[\int\limits_e^{2e}'
+            # \sqrt and \frac draw horizontal rules, \mathrm changes the font,
+            # the minus sign hits character code 0 in the Type 1 font that LaTeX uses.
+            r'\LaTeX\ $\left[\int\limits_e^{-2e}'
             r'\sqrt\frac{\log^3 x}{x}\,\mathrm{d}x \right\}$',
             **kwargs)
     ax.text(0.2, 0.3, "lg", **kwargs)
@@ -41,13 +44,25 @@ def test_usetex():
     ax.set_axis_off()
 
 
-@check_figures_equal()
+def test_usetex_fallback(monkeypatch):
+    # Smoke test that the base draw_tex implementation works.
+    from matplotlib.backend_bases import RendererBase
+    from matplotlib.backends.backend_agg import RendererAgg
+    monkeypatch.setattr(RendererAgg, 'draw_tex', RendererBase.draw_tex)
+
+    plt.rcParams["text.usetex"] = True
+    fig, ax = plt.subplots()
+    ax.text(0, 0, "foo_bar")
+    fig.canvas.draw()
+
+
+@check_figures_equal(extensions=['png', 'pdf', 'svg'])
 def test_empty(fig_test, fig_ref):
     mpl.rcParams['text.usetex'] = True
     fig_test.text(.5, .5, "% a comment")
 
 
-@check_figures_equal()
+@check_figures_equal(extensions=['png', 'pdf', 'svg'])
 def test_unicode_minus(fig_test, fig_ref):
     mpl.rcParams['text.usetex'] = True
     fig_test.text(.5, .5, "$-$")
@@ -64,6 +79,21 @@ def test_mathdefault():
     fig.canvas.draw()
 
 
+@image_comparison(['eqnarray.png'], style='mpl20')
+def test_multiline_eqnarray():
+    text = (
+        r'\begin{eqnarray*}'
+        r'foo\\'
+        r'bar\\'
+        r'baz\\'
+        r'\end{eqnarray*}'
+    )
+
+    fig = plt.figure(figsize=(1, 1))
+    fig.text(0.5, 0.5, text, usetex=True,
+             horizontalalignment='center', verticalalignment='center')
+
+
 @pytest.mark.parametrize("fontsize", [8, 10, 12])
 def test_minus_no_descent(fontsize):
     # Test special-casing of minus descent in DviFont._height_depth_of, by
@@ -74,7 +104,7 @@ def test_minus_no_descent(fontsize):
     heights = {}
     fig = plt.figure()
     for vals in [(1,), (-1,), (-1, 1)]:
-        fig.clf()
+        fig.clear()
         for x in vals:
             fig.text(.5, .5, f"${x}$", usetex=True)
         fig.canvas.draw()
@@ -131,10 +161,111 @@ def test_missing_psfont(fmt, monkeypatch):
     monkeypatch.setattr(
         dviread.PsfontsMap, '__getitem__',
         lambda self, k: dviread.PsFont(
-            texname='texfont', psname='Some Font',
+            texname=b'texfont', psname=b'Some Font',
             effects=None, encoding=None, filename=None))
     mpl.rcParams['text.usetex'] = True
     fig, ax = plt.subplots()
     ax.text(0.5, 0.5, 'hello')
     with TemporaryFile() as tmpfile, pytest.raises(ValueError):
         fig.savefig(tmpfile, format=fmt)
+
+
+def test_pdf_type1_font_subsetting():
+    """Test that fonts in PDF output are properly subset."""
+    pikepdf = pytest.importorskip("pikepdf")
+
+    mpl.rcParams["text.usetex"] = True
+    mpl.rcParams["text.latex.preamble"] = r"\usepackage{amssymb}"
+    fig, ax = plt.subplots()
+    ax.text(0.2, 0.7, r"$\int_{-\infty}^{\aleph}\sqrt{\alpha\beta\gamma}\mathrm{d}x$")
+    ax.text(0.2, 0.5, r"$\mathfrak{x}\circledcirc\mathfrak{y}\in\mathbb{R}$")
+
+    with TemporaryFile() as tmpfile:
+        fig.savefig(tmpfile, format="pdf")
+        tmpfile.seek(0)
+        pdf = pikepdf.Pdf.open(tmpfile)
+
+        length = {}
+        page = pdf.pages[0]
+        for font_name, font in page.Resources.Font.items():
+            assert font.Subtype == "/Type1", (
+                f"Font {font_name}={font} is not a Type 1 font"
+            )
+
+            # Subsetted font names have a 6-character tag followed by a '+'
+            base_font = str(font["/BaseFont"]).removeprefix("/")
+            assert re.match(r"^[A-Z]{6}\+", base_font), (
+                f"Font {font_name}={base_font} lacks a subset indicator tag"
+            )
+            assert "/FontFile" in font.FontDescriptor, (
+                f"Type 1 font {font_name}={base_font} is not embedded"
+            )
+            _, original_name = base_font.split("+", 1)
+            length[original_name] = len(bytes(font["/FontDescriptor"]["/FontFile"]))
+
+    print("Embedded font stream lengths:", length)
+    # We should have several fonts, each much smaller than the original.
+    # I get under 10kB on my system for each font, but allow 15kB in case
+    # of differences in the font files.
+    assert {
+        'CMEX10',
+        'CMMI12',
+        'CMR12',
+        'CMSY10',
+        'CMSY8',
+        'EUFM10',
+        'MSAM10',
+        'MSBM10',
+    }.issubset(length), "Missing expected fonts in the PDF"
+    for font_name, length in length.items():
+        assert length < 15_000, (
+            f"Font {font_name}={length} is larger than expected"
+        )
+
+    # For comparison, lengths without subsetting on my system:
+    #  'CMEX10': 29686
+    #  'CMMI12': 36176
+    #  'CMR12': 32157
+    #  'CMSY10': 32004
+    #  'CMSY8': 32061
+    #  'EUFM10': 20546
+    #  'MSAM10': 31199
+    #  'MSBM10': 34129
+
+
+try:
+    _old_gs_version = mpl._get_executable_info('gs').version < parse_version('9.55')
+except mpl.ExecutableNotFoundError:
+    _old_gs_version = True
+
+
+@image_comparison(baseline_images=['rotation'], extensions=['eps', 'pdf', 'png', 'svg'],
+                  style='mpl20', tol=3.91 if _old_gs_version else 0)
+def test_rotation():
+    mpl.rcParams['text.usetex'] = True
+
+    fig = plt.figure()
+    ax = fig.add_axes((0, 0, 1, 1))
+    ax.set(xlim=(-0.5, 5), xticks=[], ylim=(-0.5, 3), yticks=[], frame_on=False)
+
+    text = {val: val[0] for val in ['top', 'center', 'bottom', 'left', 'right']}
+    text['baseline'] = 'B'
+    text['center_baseline'] = 'C'
+
+    for i, va in enumerate(['top', 'center', 'bottom', 'baseline', 'center_baseline']):
+        for j, ha in enumerate(['left', 'center', 'right']):
+            for k, angle in enumerate([0, 90, 180, 270]):
+                k //= 2
+                x = i + k / 2
+                y = j + k / 2
+                ax.plot(x, y, '+', c=f'C{k}', markersize=20, markeredgewidth=0.5)
+                # 'My' checks full height letters plus descenders.
+                ax.text(x, y, f"$\\mathrm{{My {text[ha]}{text[va]} {angle}}}$",
+                        rotation=angle, horizontalalignment=ha, verticalalignment=va)
+
+
+def test_unicode_sizing():
+    tp = mpl.textpath.TextToPath()
+    scale1 = tp.get_glyphs_tex(mpl.font_manager.FontProperties(), "W")[0][0][3]
+    scale2 = tp.get_glyphs_tex(mpl.font_manager.FontProperties(), r"\textwon")[0][0][3]
+    assert scale1 == scale2

@@ -1,5 +1,5 @@
+from matplotlib import cbook
 from matplotlib.artist import Artist
-import matplotlib.cbook as cbook
 
 
 class Container(tuple):
@@ -11,16 +11,15 @@ class Container(tuple):
     """
 
     def __repr__(self):
-        return ("<{} object of {} artists>"
-                .format(type(self).__name__, len(self)))
+        return f"<{type(self).__name__} object of {len(self)} artists>"
 
     def __new__(cls, *args, **kwargs):
         return tuple.__new__(cls, args[0])
 
     def __init__(self, kl, label=None):
-        self._callbacks = cbook.CallbackRegistry()
+        self._callbacks = cbook.CallbackRegistry(signals=["pchanged"])
         self._remove_method = None
-        self.set_label(label)
+        self._label = str(label) if label is not None else None
 
     def remove(self):
         for c in cbook.flatten(
@@ -64,15 +63,77 @@ class BarContainer(Container):
         If 'vertical', the bars are assumed to be vertical.
         If 'horizontal', the bars are assumed to be horizontal.
 
+    group_positions : None or array-like
+        The center positions of the bar groups if the container is part of a
+        grouped bar plot (e.g. created by `.Axes.grouped_bar`). *None* otherwise.
+
+        .. versionadded:: 3.12
     """
 
     def __init__(self, patches, errorbar=None, *, datavalues=None,
-                 orientation=None, **kwargs):
+                 orientation=None, group_positions=None, **kwargs):
         self.patches = patches
         self.errorbar = errorbar
         self.datavalues = datavalues
         self.orientation = orientation
+        self.group_positions = group_positions
         super().__init__(patches, **kwargs)
+
+    @property
+    def bottoms(self):
+        """
+        Return the values at the lower end of the bars.
+
+        .. versionadded:: 3.11
+        """
+        if self.orientation == 'vertical':
+            return [p.get_y() for p in self.patches]
+        elif self.orientation == 'horizontal':
+            return [p.get_x() for p in self.patches]
+        else:
+            raise ValueError("orientation must be 'vertical' or 'horizontal'.")
+
+    @property
+    def tops(self):
+        """
+        Return the values at the upper end of the bars.
+
+        .. versionadded:: 3.11
+        """
+        if self.orientation == 'vertical':
+            return [p.get_y() + p.get_height() for p in self.patches]
+        elif self.orientation == 'horizontal':
+            return [p.get_x() + p.get_width() for p in self.patches]
+        else:
+            raise ValueError("orientation must be 'vertical' or 'horizontal'.")
+
+    @property
+    def position_centers(self):
+        """
+        Return the centers of bar positions.
+
+        .. versionadded:: 3.11
+        """
+        if self.orientation == 'vertical':
+            return [p.get_x() + p.get_width() / 2 for p in self.patches]
+        elif self.orientation == 'horizontal':
+            return [p.get_y() + p.get_height() / 2 for p in self.patches]
+        else:
+            raise ValueError("orientation must be 'vertical' or 'horizontal'.")
+
+    @property
+    def widths(self):
+        """
+        Return the widths of the bars.
+
+        .. versionadded:: 3.12
+        """
+        if self.orientation == 'vertical':
+            return [p.get_width() for p in self.patches]
+        elif self.orientation == 'horizontal':
+            return [p.get_height() for p in self.patches]
+        else:
+            raise ValueError("orientation must be 'vertical' or 'horizontal'.")
 
 
 class ErrorbarContainer(Container):
@@ -88,12 +149,12 @@ class ErrorbarContainer(Container):
     lines : tuple
         Tuple of ``(data_line, caplines, barlinecols)``.
 
-        - data_line : :class:`~matplotlib.lines.Line2D` instance of
-          x, y plot markers and/or line.
-        - caplines : tuple of :class:`~matplotlib.lines.Line2D` instances of
-          the error bar caps.
-        - barlinecols : list of :class:`~matplotlib.collections.LineCollection`
-          with the horizontal and vertical error ranges.
+        - data_line : A `~matplotlib.lines.Line2D` instance of x, y plot markers
+          and/or line.
+        - caplines : A tuple of `~matplotlib.lines.Line2D` instances of the error
+          bar caps.
+        - barlinecols : A tuple of `~matplotlib.collections.LineCollection` with the
+          horizontal and vertical error ranges.
 
     has_xerr, has_yerr : bool
         ``True`` if the errorbar has x/y errors.
@@ -107,6 +168,78 @@ class ErrorbarContainer(Container):
         super().__init__(lines, **kwargs)
 
 
+class PieContainer:
+    """
+    Container for the artists of pie charts (e.g. created by `.Axes.pie`).
+
+    .. versionadded:: 3.11
+
+    .. warning::
+        The class name ``PieContainer`` name is provisional and may change in future
+        to reflect development of its functionality.
+
+    You can access the wedge patches and further parameters by the attributes.
+
+    Attributes
+    ----------
+    wedges : list of `~matplotlib.patches.Wedge`
+        The artists of the pie wedges.
+
+    values : `numpy.ndarray`
+        The data that the pie is based on.
+
+    fracs : `numpy.ndarray`
+        The fraction of the pie that each wedge represents.
+
+    texts : list of list of `~matplotlib.text.Text`
+        The artists of any labels on the pie wedges.  Each inner list has one
+        text label per wedge.
+
+    """
+    def __init__(self, wedges, values, normalize):
+        self.wedges = wedges
+        self._texts = []
+        self._values = values
+        self._normalize = normalize
+
+    @property
+    def texts(self):
+        # Only return non-empty sublists.  An empty sublist may have been added
+        # for backwards compatibility of the Axes.pie return value (see __getitem__).
+        return [t_list for t_list in self._texts if t_list]
+
+    @property
+    def values(self):
+        result = self._values.copy()
+        result.flags.writeable = False
+        return result
+
+    @property
+    def fracs(self):
+        if self._normalize:
+            result = self._values / self._values.sum()
+        else:
+            result = self._values
+
+        result.flags.writeable = False
+        return result
+
+    def add_texts(self, texts):
+        """Add a list of `~matplotlib.text.Text` objects to the container."""
+        self._texts.append(texts)
+
+    def remove(self):
+        """Remove all wedges and texts from the axes"""
+        for artist_list in self.wedges, self._texts:
+            for artist in cbook.flatten(artist_list):
+                artist.remove()
+
+    def __getitem__(self, key):
+        # needed to support unpacking into a tuple for backward compatibility of the
+        # Axes.pie return value
+        return (self.wedges, *self._texts)[key]
+
+
 class StemContainer(Container):
     """
     Container for the artists created in a :meth:`.Axes.stem` plot.
@@ -116,13 +249,13 @@ class StemContainer(Container):
 
     Attributes
     ----------
-    markerline :  :class:`~matplotlib.lines.Line2D`
+    markerline : `~matplotlib.lines.Line2D`
         The artist of the markers at the stem heads.
 
-    stemlines : list of :class:`~matplotlib.lines.Line2D`
+    stemlines : `~matplotlib.collections.LineCollection`
         The artists of the vertical lines for all stems.
 
-    baseline : :class:`~matplotlib.lines.Line2D`
+    baseline : `~matplotlib.lines.Line2D`
         The artist of the horizontal baseline.
     """
     def __init__(self, markerline_stemlines_baseline, **kwargs):
@@ -131,7 +264,7 @@ class StemContainer(Container):
         ----------
         markerline_stemlines_baseline : tuple
             Tuple of ``(markerline, stemlines, baseline)``.
-            ``markerline`` contains the `.LineCollection` of the markers,
+            ``markerline`` contains the `.Line2D` of the markers,
             ``stemlines`` is a `.LineCollection` of the main lines,
             ``baseline`` is the `.Line2D` of the baseline.
         """

@@ -6,8 +6,7 @@ mplot3d FAQ
 
 How is mplot3d different from Mayavi?
 =====================================
-`Mayavi <https://docs.enthought.com/mayavi/mayavi/>`_
-is a very powerful and featureful 3D graphing library. For advanced
+Mayavi_ is a very powerful and featureful 3D graphing library. For advanced
 3D scenes and excellent rendering capabilities, it is highly recommended to
 use Mayavi.
 
@@ -25,20 +24,19 @@ of another object, even though it is physically behind it. This can result in
 plots that do not look "physically correct."
 
 Unfortunately, while some work is being done to reduce the occurrence of this
-artifact, it is currently an intractable problem, and can not be fully solved
+artifact, it is currently an intractable problem, and cannot be fully solved
 until matplotlib supports 3D graphics rendering at its core.
 
 The problem occurs due to the reduction of 3D data down to 2D + z-order
 scalar. A single value represents the 3rd dimension for all parts of 3D
 objects in a collection. Therefore, when the bounding boxes of two collections
 intersect, it becomes possible for this artifact to occur. Furthermore, the
-intersection of two 3D objects (such as polygons or patches) can not be
+intersection of two 3D objects (such as polygons or patches) cannot be
 rendered properly in matplotlib's 2D rendering engine.
 
 This problem will likely not be solved until OpenGL support is added to all of
 the backends (patches are greatly welcomed). Until then, if you need complex
-3D scenes, we recommend using
-`MayaVi <https://docs.enthought.com/mayavi/mayavi/>`_.
+3D scenes, we recommend using Mayavi_.
 
 
 I don't like how the 3D plot is laid out, how do I change that?
@@ -50,3 +48,4 @@ a semi-official manner to modify these parameters. See the note in the
 :mod:`.mplot3d.axis3d` section of the mplot3d API documentation for
 more information.
 
+.. _Mayavi: https://docs.enthought.com/mayavi/mayavi/

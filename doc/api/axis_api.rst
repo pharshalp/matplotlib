@@ -41,7 +41,6 @@ Inheritance
    :nosignatures:
 
    Axis.clear
-   Axis.cla
    Axis.get_scale
 
 
@@ -74,12 +73,14 @@ Axis Label
    :template: autosummary.rst
    :nosignatures:
 
+   Axis.label
    Axis.set_label_coords
    Axis.set_label_position
    Axis.set_label_text
-   Axis.get_label
    Axis.get_label_position
    Axis.get_label_text
+
+.. _axis-api-ticks:
 
 Ticks, tick labels and Offset text
 ----------------------------------
@@ -101,6 +102,7 @@ Ticks, tick labels and Offset text
    Axis.get_offset_text
 
    Axis.get_tick_padding
+   Axis.get_tick_params
    Axis.get_ticklabels
    Axis.get_ticklines
    Axis.get_ticklocs
@@ -111,6 +113,9 @@ Ticks, tick labels and Offset text
    Axis.set_tick_params
 
    Axis.axis_date
+
+   Axis.minorticks_off
+   Axis.minorticks_on
 
 
 Data and view intervals
@@ -138,7 +143,6 @@ Rendering helpers
 
    Axis.get_minpos
    Axis.get_tick_space
-   Axis.get_ticklabel_extents
    Axis.get_tightbbox
 
 
@@ -151,6 +155,7 @@ Interactive
    :nosignatures:
 
    Axis.contains
+   Axis.pickradius
    Axis.get_pickradius
    Axis.set_pickradius
 
@@ -166,6 +171,8 @@ Units
    Axis.convert_units
    Axis.set_units
    Axis.get_units
+   Axis.set_converter
+   Axis.get_converter
    Axis.update_units
 
 
@@ -178,7 +185,6 @@ XAxis Specific
    :nosignatures:
 
    XAxis.axis_name
-   XAxis.get_text_heights
    XAxis.get_ticks_position
    XAxis.set_ticks_position
    XAxis.set_label_position
@@ -194,7 +200,6 @@ YAxis Specific
    :nosignatures:
 
    YAxis.axis_name
-   YAxis.get_text_widths
    YAxis.get_ticks_position
    YAxis.set_offset_position
    YAxis.set_ticks_position
@@ -216,6 +221,7 @@ Other
    Axis.axes
    Axis.limit_range_for_scale
    Axis.reset_ticks
+   Axis.set_clip_path
    Axis.set_default_intervals
 
 Discouraged
@@ -233,6 +239,8 @@ specify a matching series of labels.  Calling ``set_ticks`` makes a
    :template: autosummary.rst
    :nosignatures:
 
+   Axis.get_label
+   Axis.set_label
    Axis.set_ticks
    Axis.set_ticklabels
 
@@ -259,12 +267,10 @@ specify a matching series of labels.  Calling ``set_ticks`` makes a
 
    Tick.get_loc
    Tick.get_pad
-   Tick.get_pad_pixels
    Tick.get_tick_padding
    Tick.get_tickdir
    Tick.get_view_interval
-   Tick.set_label1
-   Tick.set_label2
+   Tick.set_clip_path
    Tick.set_pad
    Tick.set_url
    Tick.update_position

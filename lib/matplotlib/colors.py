@@ -16,12 +16,12 @@ makes a colormap from a list of colors.
 
 .. seealso::
 
-  :doc:`/tutorials/colors/colormap-manipulation` for examples of how to
+  :ref:`colormap-manipulation` for examples of how to
   make colormaps and
 
-  :doc:`/tutorials/colors/colormaps` for a list of built-in colormaps.
+  :ref:`colormaps` for a list of built-in colormaps.
 
-  :doc:`/tutorials/colors/colormapnorms` for more details about data
+  :ref:`colormapnorms` for more details about data
   normalization
 
   More colormaps are available at palettable_.
@@ -33,27 +33,29 @@ to an RGBA tuple (`to_rgba`) or to an HTML-like hex string in the
 RGBA array (`to_rgba_array`).  Caching is used for efficiency.
 
 Colors that Matplotlib recognizes are listed at
-:doc:`/tutorials/colors/colors`.
+:ref:`colors_def`.
 
 .. _palettable: https://jiffyclub.github.io/palettable/
 .. _xkcd color survey: https://xkcd.com/color/rgb/
 """
 
 import base64
-from collections.abc import Sized, Sequence
-import copy
+from collections.abc import Sequence, Mapping
+from abc import ABC, abstractmethod
 import functools
+import importlib
 import inspect
 import io
 import itertools
-from numbers import Number
+from numbers import Real
 import re
+
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
 import matplotlib as mpl
 import numpy as np
-from matplotlib import _api, cbook, scale
+from matplotlib import _api, _cm, cbook, scale
 from ._color_data import BASE_COLORS, TABLEAU_COLORS, CSS4_COLORS, XKCD_COLORS
 
 
@@ -86,11 +88,122 @@ _colors_full_map.update(BASE_COLORS)
 _colors_full_map = _ColorMapping(_colors_full_map)
 
 _REPR_PNG_SIZE = (512, 64)
+_BIVAR_REPR_PNG_SIZE = 256
 
 
 def get_named_colors_mapping():
     """Return the global mapping of names to named colors."""
     return _colors_full_map
+
+
+class ColorSequenceRegistry(Mapping):
+    r"""
+    Container for sequences of colors that are known to Matplotlib by name.
+
+    The universal registry instance is `matplotlib.color_sequences`. There
+    should be no need for users to instantiate `.ColorSequenceRegistry`
+    themselves.
+
+    Read access uses a dict-like interface mapping names to lists of colors::
+
+        import matplotlib as mpl
+        colors = mpl.color_sequences['tab10']
+
+    For a list of built in color sequences, see :doc:`/gallery/color/color_sequences`.
+    The returned lists are copies, so that their modification does not change
+    the global definition of the color sequence.
+
+    Additional color sequences can be added via
+    `.ColorSequenceRegistry.register`::
+
+        mpl.color_sequences.register('rgb', ['r', 'g', 'b'])
+    """
+
+    _BUILTIN_COLOR_SEQUENCES = {
+        'tab10': _cm._tab10_data,
+        'tab20': _cm._tab20_data,
+        'tab20b': _cm._tab20b_data,
+        'tab20c': _cm._tab20c_data,
+        'Pastel1': _cm._Pastel1_data,
+        'Pastel2': _cm._Pastel2_data,
+        'Paired': _cm._Paired_data,
+        'Accent': _cm._Accent_data,
+        'okabe_ito': _cm._okabe_ito_data,
+        'Dark2': _cm._Dark2_data,
+        'Set1': _cm._Set1_data,
+        'Set2': _cm._Set2_data,
+        'Set3': _cm._Set3_data,
+        'petroff6': _cm._petroff6_data,
+        'petroff8': _cm._petroff8_data,
+        'petroff10': _cm._petroff10_data,
+    }
+
+    def __init__(self):
+        self._color_sequences = {**self._BUILTIN_COLOR_SEQUENCES}
+
+    def __getitem__(self, item):
+        return list(_api.getitem_checked(self._color_sequences, _error_cls=KeyError,
+                                         sequence_name=item))
+
+    def __iter__(self):
+        return iter(self._color_sequences)
+
+    def __len__(self):
+        return len(self._color_sequences)
+
+    def __str__(self):
+        return ('ColorSequenceRegistry; available colormaps:\n' +
+                ', '.join(f"'{name}'" for name in self))
+
+    def register(self, name, color_list):
+        """
+        Register a new color sequence.
+
+        The color sequence registry stores a copy of the given *color_list*, so
+        that future changes to the original list do not affect the registered
+        color sequence. Think of this as the registry taking a snapshot
+        of *color_list* at registration.
+
+        Parameters
+        ----------
+        name : str
+            The name for the color sequence.
+
+        color_list : list of :mpltype:`color`
+            An iterable returning valid Matplotlib colors when iterating over.
+            Note however that the returned color sequence will always be a
+            list regardless of the input type.
+
+        """
+        if name in self._BUILTIN_COLOR_SEQUENCES:
+            raise ValueError(f"{name!r} is a reserved name for a builtin "
+                             "color sequence")
+
+        color_list = list(color_list)  # force copy and coerce type to list
+        for color in color_list:
+            try:
+                to_rgba(color)
+            except ValueError:
+                raise ValueError(
+                    f"{color!r} is not a valid color specification")
+
+        self._color_sequences[name] = color_list
+
+    def unregister(self, name):
+        """
+        Remove a sequence from the registry.
+
+        You cannot remove built-in color sequences.
+
+        If the name is not registered, returns with no error.
+        """
+        if name in self._BUILTIN_COLOR_SEQUENCES:
+            raise ValueError(
+                f"Cannot unregister builtin color sequence {name!r}")
+        self._color_sequences.pop(name, None)
+
+
+_color_sequences = ColorSequenceRegistry()
 
 
 def _sanitize_extrema(ex):
@@ -102,23 +215,57 @@ def _sanitize_extrema(ex):
         ret = float(ex)
     return ret
 
+_nth_color_re = re.compile(r"\AC[0-9]+\Z")
+
 
 def _is_nth_color(c):
     """Return whether *c* can be interpreted as an item in the color cycle."""
-    return isinstance(c, str) and re.match(r"\AC[0-9]+\Z", c)
+    return isinstance(c, str) and _nth_color_re.match(c)
 
 
 def is_color_like(c):
-    """Return whether *c* can be interpreted as an RGB(A) color."""
+    """Return whether *c* as a valid Matplotlib :mpltype:`color` specifier."""
     # Special-case nth color syntax because it cannot be parsed during setup.
     if _is_nth_color(c):
         return True
     try:
         to_rgba(c)
-    except ValueError:
+    except (TypeError, ValueError):
         return False
     else:
         return True
+
+
+def _has_alpha_channel(c):
+    """
+    Return whether *c* is a color with an alpha channel.
+
+    If *c* is not a valid color specifier, then the result is undefined.
+    """
+    # The following logic uses the assumption that c is a valid color spec.
+    # For speed and simplicity, we intentionally don't care about other inputs.
+    # Anything can happen with them.
+
+    # if c is a hex, it has an alpha channel when it has 4 (or 8) digits after '#'
+    if isinstance(c, str):
+        if c[0] == '#' and (len(c) == 5 or len(c) == 9):
+            # example: '#fff8' or '#0f0f0f80'
+            return True
+    else:
+        # if c isn't a string, it can be an RGB(A) or a color-alpha tuple
+        # if it has length 4, it has an alpha channel
+        if len(c) == 4:
+            # example: [0.5, 0.5, 0.5, 0.5]
+            return True
+
+        # if it has length 2, it's a color/alpha tuple
+        # if the second element isn't None or the first element has length = 4
+        if len(c) == 2 and (c[1] is not None or _has_alpha_channel(c[0])):
+            # example: ([0.5, 0.5, 0.5, 0.5], None) or ('r', 0.5)
+            return True
+
+    # otherwise it doesn't have an alpha channel
+    return False
 
 
 def _check_color_like(**kwargs):
@@ -127,14 +274,29 @@ def _check_color_like(**kwargs):
     """
     for k, v in kwargs.items():
         if not is_color_like(v):
-            raise ValueError(f"{v!r} is not a valid value for {k}")
+            raise ValueError(
+                f"{v!r} is not a valid value for {k}: supported inputs are "
+                f"(r, g, b) and (r, g, b, a) 0-1 float tuples; "
+                f"'#rrggbb', '#rrggbbaa', '#rgb', '#rgba' strings; "
+                f"named color strings; "
+                f"string reprs of 0-1 floats for grayscale values; "
+                f"'C0', 'C1', ... strings for colors of the color cycle; "
+                f"and pairs combining one of the above with an alpha value")
 
 
 def same_color(c1, c2):
     """
     Return whether the colors *c1* and *c2* are the same.
 
-    *c1*, *c2* can be single colors or lists/arrays of colors.
+    Parameters
+    ----------
+    c1, c2 : :mpltype:`color` or list of :mpltype:`color` or RGB(A) array
+        If passing multiple colors, *c1* and *c2* must be of the same length. RGB(A)
+        arrays must be of shape (ncolors, 3) or (ncolors, 4).
+
+    Returns
+    -------
+    bool
     """
     c1 = to_rgba_array(c1)
     c2 = to_rgba_array(c2)
@@ -155,7 +317,7 @@ def to_rgba(c, alpha=None):
 
     Parameters
     ----------
-    c : Matplotlib color or ``np.ma.masked``
+    c : :mpltype:`color` or ``np.ma.masked``
 
     alpha : float, optional
         If *alpha* is given, force the alpha value of the returned RGBA tuple
@@ -173,10 +335,14 @@ def to_rgba(c, alpha=None):
         Tuple of floats ``(r, g, b, a)``, where each channel (red, green, blue,
         alpha) can assume values between 0 and 1.
     """
+    if isinstance(c, tuple) and len(c) == 2:
+        if alpha is None:
+            c, alpha = c
+        else:
+            c = c[0]
     # Special-case nth color syntax because it should not be cached.
     if _is_nth_color(c):
-        from matplotlib import rcParams
-        prop_cycler = rcParams['axes.prop_cycle']
+        prop_cycler = mpl.rcParams['axes.prop_cycle']
         colors = prop_cycler.by_key().get('color', ['k'])
         c = colors[int(c[1:]) % len(colors)]
     try:
@@ -203,6 +369,8 @@ def _to_rgba_no_colorcycle(c, alpha=None):
     *alpha* is ignored for the color value ``"none"`` (case-insensitive),
     which always maps to ``(0, 0, 0, 0)``.
     """
+    if alpha is not None and not 0 <= alpha <= 1:
+        raise ValueError("'alpha' must be between 0 and 1, inclusive")
     orig_c = c
     if c is np.ma.masked:
         return (0., 0., 0., 0.)
@@ -214,40 +382,31 @@ def _to_rgba_no_colorcycle(c, alpha=None):
             # This may turn c into a non-string, so we check again below.
             c = _colors_full_map[c]
         except KeyError:
-            if len(orig_c) != 1:
+            if len(c) != 1:
                 try:
                     c = _colors_full_map[c.lower()]
                 except KeyError:
                     pass
     if isinstance(c, str):
-        # hex color in #rrggbb format.
-        match = re.match(r"\A#[a-fA-F0-9]{6}\Z", c)
-        if match:
-            return (tuple(int(n, 16) / 255
-                          for n in [c[1:3], c[3:5], c[5:7]])
-                    + (alpha if alpha is not None else 1.,))
-        # hex color in #rgb format, shorthand for #rrggbb.
-        match = re.match(r"\A#[a-fA-F0-9]{3}\Z", c)
-        if match:
-            return (tuple(int(n, 16) / 255
-                          for n in [c[1]*2, c[2]*2, c[3]*2])
-                    + (alpha if alpha is not None else 1.,))
-        # hex color with alpha in #rrggbbaa format.
-        match = re.match(r"\A#[a-fA-F0-9]{8}\Z", c)
-        if match:
-            color = [int(n, 16) / 255
-                     for n in [c[1:3], c[3:5], c[5:7], c[7:9]]]
-            if alpha is not None:
-                color[-1] = alpha
-            return tuple(color)
-        # hex color with alpha in #rgba format, shorthand for #rrggbbaa.
-        match = re.match(r"\A#[a-fA-F0-9]{4}\Z", c)
-        if match:
-            color = [int(n, 16) / 255
-                     for n in [c[1]*2, c[2]*2, c[3]*2, c[4]*2]]
-            if alpha is not None:
-                color[-1] = alpha
-            return tuple(color)
+        if re.fullmatch("#[a-fA-F0-9]+", c):
+            if len(c) == 7:  # #rrggbb hex format.
+                return (*[n / 0xff for n in bytes.fromhex(c[1:])],
+                        alpha if alpha is not None else 1.)
+            elif len(c) == 4:  # #rgb hex format, shorthand for #rrggbb.
+                return (*[int(n, 16) / 0xf for n in c[1:]],
+                        alpha if alpha is not None else 1.)
+            elif len(c) == 9:  # #rrggbbaa hex format.
+                color = [n / 0xff for n in bytes.fromhex(c[1:])]
+                if alpha is not None:
+                    color[-1] = alpha
+                return tuple(color)
+            elif len(c) == 5:  # #rgba hex format, shorthand for #rrggbbaa.
+                color = [int(n, 16) / 0xf for n in c[1:]]
+                if alpha is not None:
+                    color[-1] = alpha
+                return tuple(color)
+            else:
+                raise ValueError(f"Invalid hex color specifier: {orig_c!r}")
         # string gray.
         try:
             c = float(c)
@@ -269,7 +428,7 @@ def _to_rgba_no_colorcycle(c, alpha=None):
         raise ValueError(f"Invalid RGBA argument: {orig_c!r}")
     if len(c) not in [3, 4]:
         raise ValueError("RGBA sequence should have length 3 or 4")
-    if not all(isinstance(x, Number) for x in c):
+    if not all(isinstance(x, Real) for x in c):
         # Checks that don't work: `map(float, ...)`, `np.array(..., float)` and
         # `np.array(...).astype(float)` would all convert "0.5" to 0.5.
         raise ValueError(f"Invalid RGBA argument: {orig_c!r}")
@@ -290,9 +449,9 @@ def to_rgba_array(c, alpha=None):
 
     Parameters
     ----------
-    c : Matplotlib color or array of colors
-        If *c* is a masked array, an ndarray is returned with a (0, 0, 0, 0)
-        row for each masked value or row in *c*.
+    c : :mpltype:`color` or list of :mpltype:`color` or RGB(A) array
+        If *c* is a masked array, an `~numpy.ndarray` is returned with a
+        (0, 0, 0, 0) row for each masked value or row in *c*.
 
     alpha : float or sequence of floats, optional
         If *alpha* is given, force the alpha value of the returned RGBA tuple
@@ -313,6 +472,11 @@ def to_rgba_array(c, alpha=None):
         (n, 4) array of RGBA colors,  where each channel (red, green, blue,
         alpha) can assume values between 0 and 1.
     """
+    if isinstance(c, tuple) and len(c) == 2 and isinstance(c[1], Real):
+        if alpha is None:
+            c, alpha = c
+        else:
+            c = c[0]
     # Special-case inputs that are already arrays, for performance.  (If the
     # array has the wrong kind or shape, raise the error during one-at-a-time
     # conversion.)
@@ -352,13 +516,14 @@ def to_rgba_array(c, alpha=None):
             return np.array([to_rgba(c, a) for a in alpha], float)
         else:
             return np.array([to_rgba(c, alpha)], float)
-    except (ValueError, TypeError):
+    except TypeError:
         pass
-
+    except ValueError as e:
+        if e.args == ("'alpha' must be between 0 and 1, inclusive", ):
+            # ValueError is from _to_rgba_no_colorcycle().
+            raise e
     if isinstance(c, str):
-        raise ValueError("Using a string of single character colors as "
-                         "a color sequence is not supported. The colors can "
-                         "be passed as an explicit list instead.")
+        raise ValueError(f"{c!r} is not a valid color value.")
 
     if len(c) == 0:
         return np.zeros((0, 4), float)
@@ -378,11 +543,20 @@ def to_rgba_array(c, alpha=None):
 
     if alpha is not None:
         rgba[:, 3] = alpha
+        if isinstance(c, Sequence):
+            # ensure that an explicit alpha does not overwrite full transparency
+            # for "none"
+            none_mask = [cbook._str_equal(cc, "none") for cc in c]
+            rgba[:, 3][none_mask] = 0
     return rgba
 
 
 def to_rgb(c):
-    """Convert *c* to an RGB color, silently dropping the alpha channel."""
+    """
+    Convert the :mpltype:`color` *c* to an RGB color tuple.
+
+    If c has an alpha channel value specified, that is silently dropped.
+    """
     return to_rgba(c)[:3]
 
 
@@ -392,9 +566,9 @@ def to_hex(c, keep_alpha=False):
 
     Parameters
     ----------
-    c : :doc:`color </tutorials/colors/colors>` or `numpy.ma.masked`
+    c : :mpltype:`color` or `numpy.ma.masked`
 
-    keep_alpha: bool, default: False
+    keep_alpha : bool, default: False
       If False, use the ``#rrggbb`` format, otherwise use ``#rrggbbaa``.
 
     Returns
@@ -405,16 +579,16 @@ def to_hex(c, keep_alpha=False):
     c = to_rgba(c)
     if not keep_alpha:
         c = c[:3]
-    return "#" + "".join(format(int(round(val * 255)), "02x") for val in c)
+    return "#" + "".join(format(round(val * 255), "02x") for val in c)
 
 
 ### Backwards-compatible color-conversion API
 
 
-cnames = CSS4_COLORS
-hexColorPattern = re.compile(r"\A#[a-fA-F0-9]{6}\Z")
-rgb2hex = to_hex
-hex2color = to_rgb
+cnames = CSS4_COLORS  #: :meta private:
+hexColorPattern = re.compile(r"\A#[a-fA-F0-9]{6}\Z")  #: :meta private:
+rgb2hex = to_hex  #: :meta private:
+hex2color = to_rgb  #: :meta private:
 
 
 class ColorConverter:
@@ -422,6 +596,8 @@ class ColorConverter:
     A class only kept for backwards compatibility.
 
     Its functionality is entirely provided by module-level functions.
+
+    :meta private:
     """
     colors = _colors_full_map
     cache = _colors_full_map.cache
@@ -534,20 +710,6 @@ def _create_lookup_table(N, data, gamma=1.0):
     return np.clip(lut, 0.0, 1.0)
 
 
-def _warn_if_global_cmap_modified(cmap):
-    if getattr(cmap, '_global', False):
-        _api.warn_deprecated(
-            "3.3",
-            removal="3.6",
-            message="You are modifying the state of a globally registered "
-                    "colormap. This has been deprecated since %(since)s and "
-                    "%(removal)s, you will not be able to modify a "
-                    "registered colormap in-place. To remove this warning, "
-                    "you can make a copy of the colormap first. "
-                    f'cmap = mpl.cm.get_cmap("{cmap.name}").copy()'
-        )
-
-
 class Colormap:
     """
     Baseclass for all scalar to RGBA mappings.
@@ -560,24 +722,39 @@ class Colormap:
     chain.
     """
 
-    def __init__(self, name, N=256):
+    def __init__(self, name, N=256, *, bad=None, under=None, over=None):
         """
         Parameters
         ----------
         name : str
             The name of the colormap.
         N : int
-            The number of rgb quantization levels.
+            The number of RGB quantization levels.
+        bad : :mpltype:`color`, default: transparent
+            The color for invalid values (NaN or masked).
+
+            .. versionadded:: 3.11
+
+        under : :mpltype:`color`, default: color of the lowest value
+            The color for low out-of-range values.
+
+            .. versionadded:: 3.11
+
+        over : :mpltype:`color`, default: color of the highest value
+            The color for high out-of-range values.
+
+            .. versionadded:: 3.11
         """
         self.name = name
         self.N = int(N)  # ensure that N is always int
-        self._rgba_bad = (0.0, 0.0, 0.0, 0.0)  # If bad, don't paint anything.
-        self._rgba_under = None
-        self._rgba_over = None
+        self._rgba_bad = (0.0, 0.0, 0.0, 0.0) if bad is None else to_rgba(bad)
+        self._rgba_under = None if under is None else to_rgba(under)
+        self._rgba_over = None if over is None else to_rgba(over)
         self._i_under = self.N
         self._i_over = self.N + 1
         self._i_bad = self.N + 2
         self._isinit = False
+        self.n_variates = 1
         #: When this colormap exists on a scalar mappable and colorbar_extend
         #: is not False, colorbar creation will pick up ``colorbar_extend`` as
         #: the default value for the ``extend`` keyword in the
@@ -585,50 +762,79 @@ class Colormap:
         self.colorbar_extend = False
 
     def __call__(self, X, alpha=None, bytes=False):
-        """
+        r"""
         Parameters
         ----------
-        X : float or int, ndarray or scalar
+        X : float or int or array-like
             The data value(s) to convert to RGBA.
-            For floats, X should be in the interval ``[0.0, 1.0]`` to
+            For floats, *X* should be in the interval ``[0.0, 1.0]`` to
             return the RGBA values ``X*100`` percent along the Colormap line.
-            For integers, X should be in the interval ``[0, Colormap.N)`` to
+            For integers, *X* should be in the interval ``[0, Colormap.N)`` to
             return RGBA values *indexed* from the Colormap with index ``X``.
         alpha : float or array-like or None
             Alpha must be a scalar between 0 and 1, a sequence of such
             floats with shape matching X, or None.
-        bytes : bool
+        bytes : bool, default: False
             If False (default), the returned RGBA values will be floats in the
-            interval ``[0, 1]`` otherwise they will be uint8s in the interval
-            ``[0, 255]``.
+            interval ``[0, 1]`` otherwise they will be `numpy.uint8`\s in the
+            interval ``[0, 255]``.
 
         Returns
         -------
         Tuple of RGBA values if X is scalar, otherwise an array of
         RGBA values with a shape of ``X.shape + (4, )``.
         """
-        if not self._isinit:
-            self._init()
+        rgba, mask = self._get_rgba_and_mask(X, alpha=alpha, bytes=bytes)
+        if not np.iterable(X):
+            rgba = tuple(rgba)
+        return rgba
 
-        mask_bad = X.mask if np.ma.is_masked(X) else np.isnan(X)  # Mask nan's.
+    def _get_rgba_and_mask(self, X, alpha=None, bytes=False):
+        r"""
+        Parameters
+        ----------
+        X : float or int or array-like
+            The data value(s) to convert to RGBA.
+            For floats, *X* should be in the interval ``[0.0, 1.0]`` to
+            return the RGBA values ``X*100`` percent along the Colormap line.
+            For integers, *X* should be in the interval ``[0, Colormap.N)`` to
+            return RGBA values *indexed* from the Colormap with index ``X``.
+        alpha : float or array-like or None
+            Alpha must be a scalar between 0 and 1, a sequence of such
+            floats with shape matching X, or None.
+        bytes : bool, default: False
+            If False (default), the returned RGBA values will be floats in the
+            interval ``[0, 1]`` otherwise they will be `numpy.uint8`\s in the
+            interval ``[0, 255]``.
+
+        Returns
+        -------
+        colors : np.ndarray
+            Array of RGBA values with a shape of ``X.shape + (4, )``.
+        mask : np.ndarray
+            Boolean array with True where the input is ``np.nan`` or masked.
+        """
+        self._ensure_inited()
+
         xa = np.array(X, copy=True)
         if not xa.dtype.isnative:
-            xa = xa.byteswap().newbyteorder()  # Native byteorder is faster.
+            # Native byteorder is faster.
+            xa = xa.byteswap().view(xa.dtype.newbyteorder())
         if xa.dtype.kind == "f":
-            with np.errstate(invalid="ignore"):
-                xa *= self.N
-                # Negative values are out of range, but astype(int) would
-                # truncate them towards zero.
-                xa[xa < 0] = -1
-                # xa == 1 (== N after multiplication) is not out of range.
-                xa[xa == self.N] = self.N - 1
-                # Avoid converting large positive values to negative integers.
-                np.clip(xa, -1, self.N, out=xa)
-                xa = xa.astype(int)
-        # Set the over-range indices before the under-range;
-        # otherwise the under-range values get converted to over-range.
-        xa[xa > self.N - 1] = self._i_over
-        xa[xa < 0] = self._i_under
+            xa *= self.N
+            # xa == 1 (== N after multiplication) is not out of range.
+            xa[xa == self.N] = self.N - 1
+        # Pre-compute the masks before casting to int (which can truncate
+        # negative values to zero or wrap large floats to negative ints).
+        mask_under = xa < 0
+        mask_over = xa >= self.N
+        # If input was masked, get the bad mask from it; else mask out nans.
+        mask_bad = X.mask if np.ma.is_masked(X) else np.isnan(xa)
+        with np.errstate(invalid="ignore"):
+            # We need this cast for unsigned ints as well as floats
+            xa = xa.astype(int)
+        xa[mask_under] = self._i_under
+        xa[mask_over] = self._i_over
         xa[mask_bad] = self._i_bad
 
         lut = self._lut
@@ -646,17 +852,11 @@ class Colormap:
                     f"alpha is array-like but its shape {alpha.shape} does "
                     f"not match that of X {xa.shape}")
             rgba[..., -1] = alpha
-
             # If the "bad" color is all zeros, then ignore alpha input.
-            if (lut[-1] == 0).all() and np.any(mask_bad):
-                if np.iterable(mask_bad) and mask_bad.shape == xa.shape:
-                    rgba[mask_bad] = (0, 0, 0, 0)
-                else:
-                    rgba[..., :] = (0, 0, 0, 0)
+            if (lut[-1] == 0).all():
+                rgba[mask_bad] = (0, 0, 0, 0)
 
-        if not np.iterable(X):
-            rgba = tuple(rgba)
-        return rgba
+        return rgba, mask_bad
 
     def __copy__(self):
         cls = self.__class__
@@ -664,70 +864,67 @@ class Colormap:
         cmapobject.__dict__.update(self.__dict__)
         if self._isinit:
             cmapobject._lut = np.copy(self._lut)
-        cmapobject._global = False
         return cmapobject
 
     def __eq__(self, other):
-        if (not isinstance(other, Colormap) or self.name != other.name or
+        if (not isinstance(other, Colormap) or
                 self.colorbar_extend != other.colorbar_extend):
             return False
         # To compare lookup tables the Colormaps have to be initialized
-        if not self._isinit:
-            self._init()
-        if not other._isinit:
-            other._init()
+        self._ensure_inited()
+        other._ensure_inited()
         return np.array_equal(self._lut, other._lut)
 
     def get_bad(self):
         """Get the color for masked values."""
-        if not self._isinit:
-            self._init()
+        self._ensure_inited()
         return np.array(self._lut[self._i_bad])
 
+    @_api.deprecated(
+        "3.11",
+        pending=True,
+        alternative="cmap.with_extremes(bad=...) or Colormap(bad=...)")
     def set_bad(self, color='k', alpha=None):
         """Set the color for masked values."""
-        _warn_if_global_cmap_modified(self)
-        self._rgba_bad = to_rgba(color, alpha)
-        if self._isinit:
-            self._set_extremes()
+        self._set_extremes(bad=(color, alpha))
 
     def get_under(self):
         """Get the color for low out-of-range values."""
-        if not self._isinit:
-            self._init()
+        self._ensure_inited()
         return np.array(self._lut[self._i_under])
 
+    @_api.deprecated(
+        "3.11",
+        pending=True,
+        alternative="cmap.with_extremes(under=...) or Colormap(under=...)")
     def set_under(self, color='k', alpha=None):
         """Set the color for low out-of-range values."""
-        _warn_if_global_cmap_modified(self)
-        self._rgba_under = to_rgba(color, alpha)
-        if self._isinit:
-            self._set_extremes()
+        self._set_extremes(under=(color, alpha))
 
     def get_over(self):
         """Get the color for high out-of-range values."""
-        if not self._isinit:
-            self._init()
+        self._ensure_inited()
         return np.array(self._lut[self._i_over])
 
+    @_api.deprecated(
+        "3.11",
+        pending=True,
+        alternative="cmap.with_extremes(over=...) or Colormap(over=...)")
     def set_over(self, color='k', alpha=None):
         """Set the color for high out-of-range values."""
-        _warn_if_global_cmap_modified(self)
-        self._rgba_over = to_rgba(color, alpha)
-        if self._isinit:
-            self._set_extremes()
+        self._set_extremes(over=(color, alpha))
 
+    @_api.deprecated(
+        "3.11",
+        pending=True,
+        alternative="cmap.with_extremes(bad=..., under=..., over=...) or "
+                    "Colormap(bad=..., under=..., over=...)")
     def set_extremes(self, *, bad=None, under=None, over=None):
         """
         Set the colors for masked (*bad*) values and, when ``norm.clip =
         False``, low (*under*) and high (*over*) out-of-range values.
         """
-        if bad is not None:
-            self.set_bad(bad)
-        if under is not None:
-            self.set_under(under)
-        if over is not None:
-            self.set_over(over)
+        self._set_extremes(bad=bad, under=under, over=over)
 
     def with_extremes(self, *, bad=None, under=None, over=None):
         """
@@ -735,11 +932,27 @@ class Colormap:
         values and, when ``norm.clip = False``, low (*under*) and high (*over*)
         out-of-range values, have been set accordingly.
         """
-        new_cm = copy.copy(self)
-        new_cm.set_extremes(bad=bad, under=under, over=over)
+        new_cm = self.copy()
+        new_cm._set_extremes(bad=bad, under=under, over=over)
         return new_cm
 
-    def _set_extremes(self):
+    def _set_extremes(self, bad=None, under=None, over=None):
+        """
+        Set the colors for masked (*bad*) and out-of-range (*under* and *over*) values.
+
+        Parameters that are None are left unchanged.
+        """
+        if bad is not None:
+            self._rgba_bad = to_rgba(bad)
+        if under is not None:
+            self._rgba_under = to_rgba(under)
+        if over is not None:
+            self._rgba_over = to_rgba(over)
+        if self._isinit:
+            self._update_lut_extremes()
+
+    def _update_lut_extremes(self):
+        """Ensure than an existing lookup table has the correct extreme values."""
         if self._rgba_under:
             self._lut[self._i_under] = self._rgba_under
         else:
@@ -750,32 +963,62 @@ class Colormap:
             self._lut[self._i_over] = self._lut[self.N - 1]
         self._lut[self._i_bad] = self._rgba_bad
 
+    def with_alpha(self, alpha):
+        """
+        Return a copy of the colormap with a new uniform transparency.
+
+        Parameters
+        ----------
+        alpha : float
+             The alpha blending value, between 0 (transparent) and 1 (opaque).
+        """
+        if not isinstance(alpha, Real):
+            raise TypeError(f"'alpha' must be numeric or None, not {type(alpha)}")
+        if not 0 <= alpha <= 1:
+            raise ValueError("'alpha' must be between 0 and 1, inclusive")
+        new_cm = self.copy()
+        new_cm._ensure_inited()
+        new_cm._lut[:, 3] = alpha
+        return new_cm
+
     def _init(self):
         """Generate the lookup table, ``self._lut``."""
         raise NotImplementedError("Abstract class only")
 
-    def is_gray(self):
-        """Return whether the colormap is grayscale."""
+    def _ensure_inited(self):
         if not self._isinit:
             self._init()
+
+    def is_gray(self):
+        """Return whether the colormap is grayscale."""
+        self._ensure_inited()
         return (np.all(self._lut[:, 0] == self._lut[:, 1]) and
                 np.all(self._lut[:, 0] == self._lut[:, 2]))
 
-    def _resample(self, lutsize):
+    def resampled(self, lutsize):
         """Return a new colormap with *lutsize* entries."""
+        if hasattr(self, '_resample'):
+            _api.warn_external(
+                "The ability to resample a color map is now public API "
+                f"However the class {type(self)} still only implements "
+                "the previous private _resample method.  Please update "
+                "your class."
+            )
+            return self._resample(lutsize)
+
         raise NotImplementedError()
 
     def reversed(self, name=None):
         """
         Return a reversed instance of the Colormap.
 
-        .. note:: This function is not implemented for base class.
+        .. note:: This function is not implemented for the base class.
 
         Parameters
         ----------
         name : str, optional
-            The name for the reversed colormap. If it's None the
-            name will be the name of the parent colormap + "_r".
+            The name for the reversed colormap. If None, the
+            name is set to ``self.name + "_r"``.
 
         See Also
         --------
@@ -833,6 +1076,7 @@ class Colormap:
                 '</div>'
                 '<div style="float: right;">'
                 f'over {color_block(self.get_over())}'
+                '</div>'
                 '</div>')
 
     def copy(self):
@@ -849,43 +1093,69 @@ class LinearSegmentedColormap(Colormap):
     segments.
     """
 
-    def __init__(self, name, segmentdata, N=256, gamma=1.0):
+    def __init__(self, name, segmentdata, N=256, gamma=1.0, *,
+                 bad=None, under=None, over=None):
         """
-        Create colormap from linear mapping segments
+        Create colormap from linear mapping segments.
 
-        segmentdata argument is a dictionary with a red, green and blue
-        entries. Each entry should be a list of *x*, *y0*, *y1* tuples,
-        forming rows in a table. Entries for alpha are optional.
+        Parameters
+        ----------
+        name : str
+            The name of the colormap.
+        segmentdata : dict
+            A dictionary with keys "red", "green", "blue" for the color channels.
+            Each entry should be a list of *x*, *y0*, *y1* tuples, forming rows
+            in a table. Entries for alpha are optional.
 
-        Example: suppose you want red to increase from 0 to 1 over
-        the bottom half, green to do the same over the middle half,
-        and blue over the top half.  Then you would use::
+            Example: suppose you want red to increase from 0 to 1 over
+            the bottom half, green to do the same over the middle half,
+            and blue over the top half.  Then you would use::
 
-            cdict = {'red':   [(0.0,  0.0, 0.0),
-                               (0.5,  1.0, 1.0),
-                               (1.0,  1.0, 1.0)],
+                {
+                    'red':   [(0.0,  0.0, 0.0),
+                              (0.5,  1.0, 1.0),
+                              (1.0,  1.0, 1.0)],
+                    'green': [(0.0,  0.0, 0.0),
+                              (0.25, 0.0, 0.0),
+                              (0.75, 1.0, 1.0),
+                              (1.0,  1.0, 1.0)],
+                    'blue':  [(0.0,  0.0, 0.0),
+                              (0.5,  0.0, 0.0),
+                              (1.0,  1.0, 1.0)]
+                }
 
-                     'green': [(0.0,  0.0, 0.0),
-                               (0.25, 0.0, 0.0),
-                               (0.75, 1.0, 1.0),
-                               (1.0,  1.0, 1.0)],
+            Each row in the table for a given color is a sequence of
+            *x*, *y0*, *y1* tuples.  In each sequence, *x* must increase
+            monotonically from 0 to 1.  For any input value *z* falling
+            between *x[i]* and *x[i+1]*, the output value of a given color
+            will be linearly interpolated between *y1[i]* and *y0[i+1]*::
 
-                     'blue':  [(0.0,  0.0, 0.0),
-                               (0.5,  0.0, 0.0),
-                               (1.0,  1.0, 1.0)]}
+                row i:   x  y0  y1
+                               /
+                              /
+                row i+1: x  y0  y1
 
-        Each row in the table for a given color is a sequence of
-        *x*, *y0*, *y1* tuples.  In each sequence, *x* must increase
-        monotonically from 0 to 1.  For any input value *z* falling
-        between *x[i]* and *x[i+1]*, the output value of a given color
-        will be linearly interpolated between *y1[i]* and *y0[i+1]*::
+            Hence, y0 in the first row and y1 in the last row are never used.
 
-            row i:   x  y0  y1
-                           /
-                          /
-            row i+1: x  y0  y1
+        N : int
+            The number of RGB quantization levels.
+        gamma : float
+            Gamma correction factor for input distribution x of the mapping.
+            See also https://en.wikipedia.org/wiki/Gamma_correction.
+        bad : :mpltype:`color`, default: transparent
+            The color for invalid values (NaN or masked).
 
-        Hence y0 in the first row and y1 in the last row are never used.
+            .. versionadded:: 3.11
+
+        under : :mpltype:`color`, default: color of the lowest value
+            The color for low out-of-range values.
+
+            .. versionadded:: 3.11
+
+        over : :mpltype:`color`, default: color of the highest value
+            The color for high out-of-range values.
+
+            .. versionadded:: 3.11
 
         See Also
         --------
@@ -895,23 +1165,25 @@ class LinearSegmentedColormap(Colormap):
         """
         # True only if all colors in map are identical; needed for contouring.
         self.monochrome = False
-        super().__init__(name, N)
+        super().__init__(name, N, bad=bad, under=under, over=over)
         self._segmentdata = segmentdata
         self._gamma = gamma
 
     def _init(self):
-        self._lut = np.ones((self.N + 3, 4), float)
-        self._lut[:-3, 0] = _create_lookup_table(
+        # Assemble the LUT first in a local variable in case of parallel threads
+        lut = np.ones((self.N + 3, 4), float)
+        lut[:-3, 0] = _create_lookup_table(
             self.N, self._segmentdata['red'], self._gamma)
-        self._lut[:-3, 1] = _create_lookup_table(
+        lut[:-3, 1] = _create_lookup_table(
             self.N, self._segmentdata['green'], self._gamma)
-        self._lut[:-3, 2] = _create_lookup_table(
+        lut[:-3, 2] = _create_lookup_table(
             self.N, self._segmentdata['blue'], self._gamma)
         if 'alpha' in self._segmentdata:
-            self._lut[:-3, 3] = _create_lookup_table(
+            lut[:-3, 3] = _create_lookup_table(
                 self.N, self._segmentdata['alpha'], 1)
+        self._lut = lut
         self._isinit = True
-        self._set_extremes()
+        self._update_lut_extremes()
 
     def set_gamma(self, gamma):
         """Set a new gamma value and regenerate colormap."""
@@ -919,7 +1191,7 @@ class LinearSegmentedColormap(Colormap):
         self._init()
 
     @staticmethod
-    def from_list(name, colors, N=256, gamma=1.0):
+    def from_list(name, colors, N=256, gamma=1.0, *, bad=None, under=None, over=None):
         """
         Create a `LinearSegmentedColormap` from a list of colors.
 
@@ -927,27 +1199,47 @@ class LinearSegmentedColormap(Colormap):
         ----------
         name : str
             The name of the colormap.
-        colors : array-like of colors or array-like of (value, color)
+        colors : list of :mpltype:`color` or list of (value, color)
             If only colors are given, they are equidistantly mapped from the
             range :math:`[0, 1]`; i.e. 0 maps to ``colors[0]`` and 1 maps to
             ``colors[-1]``.
             If (value, color) pairs are given, the mapping is from *value*
-            to *color*. This can be used to divide the range unevenly.
+            to *color*. This can be used to divide the range unevenly. The
+            values must increase monotonically from 0 to 1.
         N : int
-            The number of rgb quantization levels.
+            The number of RGB quantization levels.
         gamma : float
+
+        bad : :mpltype:`color`, default: transparent
+            The color for invalid values (NaN or masked).
+        under : :mpltype:`color`, default: color of the lowest value
+            The color for low out-of-range values.
+        over : :mpltype:`color`, default: color of the highest value
+            The color for high out-of-range values.
         """
         if not np.iterable(colors):
             raise ValueError('colors must be iterable')
 
-        if (isinstance(colors[0], Sized) and len(colors[0]) == 2
-                and not isinstance(colors[0], str)):
-            # List of value, color pairs
-            vals, colors = zip(*colors)
-        else:
+        try:
+            # Assume the passed colors are a list of colors
+            # and not a (value, color) tuple.
+            r, g, b, a = to_rgba_array(colors).T
             vals = np.linspace(0, 1, len(colors))
+        except Exception as e:
+            # Assume the passed values are a list of
+            # (value, color) tuples.
+            try:
+                _vals, _colors = itertools.zip_longest(*colors)
+            except Exception as e2:
+                raise e2 from e
+            vals = np.asarray(_vals)
+            if np.min(vals) < 0 or np.max(vals) > 1 or np.any(np.diff(vals) < 0):
+                raise ValueError(
+                    "the values passed in the (value, color) pairs "
+                    "must increase monotonically from 0 to 1."
+                )
+            r, g, b, a = to_rgba_array(_colors).T
 
-        r, g, b, a = to_rgba_array(colors).T
         cdict = {
             "red": np.column_stack([vals, r, r]),
             "green": np.column_stack([vals, g, g]),
@@ -955,9 +1247,10 @@ class LinearSegmentedColormap(Colormap):
             "alpha": np.column_stack([vals, a, a]),
         }
 
-        return LinearSegmentedColormap(name, cdict, N, gamma)
+        return LinearSegmentedColormap(name, cdict, N, gamma,
+                                       bad=bad, under=under, over=over)
 
-    def _resample(self, lutsize):
+    def resampled(self, lutsize):
         """Return a new colormap with *lutsize* entries."""
         new_cmap = LinearSegmentedColormap(self.name, self._segmentdata,
                                            lutsize)
@@ -978,8 +1271,8 @@ class LinearSegmentedColormap(Colormap):
         Parameters
         ----------
         name : str, optional
-            The name for the reversed colormap. If it's None the
-            name will be the name of the parent colormap + "_r".
+            The name for the reversed colormap. If None, the
+            name is set to ``self.name + "_r"``.
 
         Returns
         -------
@@ -1013,9 +1306,9 @@ class ListedColormap(Colormap):
 
     Parameters
     ----------
-    colors : list, array
-        List of Matplotlib color specifications, or an equivalent Nx3 or Nx4
-        floating point array (*N* rgb or rgba values).
+    colors : list of :mpltype:`color` or array
+        Sequence of Matplotlib color specifications (color names or RGB(A)
+        values).
     name : str, optional
         String to identify the colormap.
     N : int, optional
@@ -1030,19 +1323,43 @@ class ListedColormap(Colormap):
             N > len(colors)
 
         the list will be extended by repetition.
+
+        .. deprecated:: 3.11
+
+            This parameter will be removed. Please instead ensure that
+            the list of passed colors is the required length.
+
+    bad : :mpltype:`color`, default: transparent
+        The color for invalid values (NaN or masked).
+
+        .. versionadded:: 3.11
+
+    under : :mpltype:`color`, default: color of the lowest value
+        The color for low out-of-range values.
+
+        .. versionadded:: 3.11
+
+    over : :mpltype:`color`, default: color of the highest value
+        The color for high out-of-range values.
+
+        .. versionadded:: 3.11
     """
-    def __init__(self, colors, name='from_list', N=None):
-        self.monochrome = False  # Are all colors identical? (for contour.py)
+
+    @_api.delete_parameter(
+        "3.11", "N",
+        message="Passing 'N' to ListedColormap is deprecated since %(since)s "
+                "and will be removed in %(removal)s. Please ensure the list "
+                "of passed colors is the required length instead."
+    )
+    def __init__(self, colors, name='unnamed', N=None, *,
+                 bad=None, under=None, over=None):
         if N is None:
             self.colors = colors
             N = len(colors)
         else:
             if isinstance(colors, str):
                 self.colors = [colors] * N
-                self.monochrome = True
             elif np.iterable(colors):
-                if len(colors) == 1:
-                    self.monochrome = True
                 self.colors = list(
                     itertools.islice(itertools.cycle(colors), N))
             else:
@@ -1052,16 +1369,30 @@ class ListedColormap(Colormap):
                     pass
                 else:
                     self.colors = [gray] * N
-                self.monochrome = True
-        super().__init__(name, N)
+        super().__init__(name, N, bad=bad, under=under, over=over)
 
     def _init(self):
-        self._lut = np.zeros((self.N + 3, 4), float)
-        self._lut[:-3] = to_rgba_array(self.colors)
+        # Assemble the LUT first in a local variable in case of parallel threads
+        lut = np.zeros((self.N + 3, 4), float)
+        lut[:-3] = to_rgba_array(self.colors)
+        self._lut = lut
         self._isinit = True
-        self._set_extremes()
+        self._update_lut_extremes()
 
-    def _resample(self, lutsize):
+    @property
+    def monochrome(self):
+        """Return whether all colors in the colormap are identical."""
+        # Replacement for the attribute *monochrome*. This ensures a consistent
+        # response independent of the way the ListedColormap was created, which
+        # was not the case for the manually set attribute.
+        #
+        # TODO: It's a separate discussion whether we need this property on
+        #       colormaps at all (at least as public API). It's a very special edge
+        #       case and we only use it for contours internally.
+        self._ensure_inited()
+        return self.N <= 1 or np.all(self._lut[0] == self._lut[1:self.N])
+
+    def resampled(self, lutsize):
         """Return a new colormap with *lutsize* entries."""
         colors = self(np.linspace(0, 1, lutsize))
         new_cmap = ListedColormap(colors, name=self.name)
@@ -1078,8 +1409,8 @@ class ListedColormap(Colormap):
         Parameters
         ----------
         name : str, optional
-            The name for the reversed colormap. If it's None the
-            name will be the name of the parent colormap + "_r".
+            The name for the reversed colormap. If None, the
+            name is set to ``self.name + "_r"``.
 
         Returns
         -------
@@ -1090,7 +1421,7 @@ class ListedColormap(Colormap):
             name = self.name + "_r"
 
         colors_r = list(reversed(self.colors))
-        new_cmap = ListedColormap(colors_r, name=name, N=self.N)
+        new_cmap = ListedColormap(colors_r, name=name)
         # Reverse the over/under values too
         new_cmap._rgba_over = self._rgba_under
         new_cmap._rgba_under = self._rgba_over
@@ -1098,10 +1429,999 @@ class ListedColormap(Colormap):
         return new_cmap
 
 
-class Normalize:
+class MultivarColormap:
     """
-    A class which, when called, linearly normalizes data into the
-    ``[0.0, 1.0]`` interval.
+    Class for holding multiple `~matplotlib.colors.Colormap` for use in a
+    `~matplotlib.cm.ScalarMappable` object
+    """
+    def __init__(self, colormaps, combination_mode, name='multivariate colormap'):
+        """
+        Parameters
+        ----------
+        colormaps : list or tuple of `~matplotlib.colors.Colormap` objects
+            The individual colormaps that are combined
+        combination_mode : str, 'sRGB_add' or 'sRGB_sub'
+            Describe how colormaps are combined in sRGB space
+
+            - If 'sRGB_add' -> Mixing produces brighter colors
+              ``sRGB = sum(colors)``
+            - If 'sRGB_sub' -> Mixing produces darker colors
+              ``sRGB = 1 - sum(1 - colors)``
+        name : str, optional
+            The name of the colormap family.
+        """
+        self.name = name
+
+        if not np.iterable(colormaps) \
+           or len(colormaps) == 1 \
+           or isinstance(colormaps, str):
+            raise ValueError("A MultivarColormap must have more than one colormap.")
+        colormaps = list(colormaps)  # ensure cmaps is a list, i.e. not a tuple
+        for i, cmap in enumerate(colormaps):
+            if isinstance(cmap, str):
+                colormaps[i] = mpl.colormaps[cmap]
+            elif not isinstance(cmap, Colormap):
+                raise ValueError("colormaps must be a list of objects that subclass"
+                                 " Colormap or a name found in the colormap registry.")
+
+        self._colormaps = colormaps
+        _api.check_in_list(['sRGB_add', 'sRGB_sub'], combination_mode=combination_mode)
+        self._combination_mode = combination_mode
+        self.n_variates = len(colormaps)
+        self._rgba_bad = (0.0, 0.0, 0.0, 0.0)  # If bad, don't paint anything.
+
+    def __call__(self, X, alpha=None, bytes=False, clip=True):
+        r"""
+        Parameters
+        ----------
+        X : tuple (X0, X1, ...) of length equal to the number of colormaps
+            X0, X1 ...:
+            float or int, `~numpy.ndarray` or scalar
+            The data value(s) to convert to RGBA.
+            For floats, *Xi...* should be in the interval ``[0.0, 1.0]`` to
+            return the RGBA values ``X*100`` percent along the Colormap line.
+            For integers, *Xi...*  should be in the interval ``[0, self[i].N)`` to
+            return RGBA values *indexed* from colormap [i] with index ``Xi``, where
+            self[i] is colormap i.
+        alpha : float or array-like or None
+            Alpha must be a scalar between 0 and 1, a sequence of such
+            floats with shape matching *Xi*, or None.
+        bytes : bool, default: False
+            If False (default), the returned RGBA values will be floats in the
+            interval ``[0, 1]`` otherwise they will be `numpy.uint8`\s in the
+            interval ``[0, 255]``.
+        clip : bool, default: True
+            If True, clip output to 0 to 1
+
+        Returns
+        -------
+        Tuple of RGBA values if X[0] is scalar, otherwise an array of
+        RGBA values with a shape of ``X.shape + (4, )``.
+        """
+
+        if len(X) != len(self):
+            raise ValueError(
+                f'For the selected colormap the data must have a first dimension '
+                f'{len(self)}, not {len(X)}')
+        rgba, mask_bad = self[0]._get_rgba_and_mask(X[0], bytes=False)
+        for c, xx in zip(self[1:], X[1:]):
+            sub_rgba, sub_mask_bad = c._get_rgba_and_mask(xx, bytes=False)
+            rgba[..., :3] += sub_rgba[..., :3]  # add colors
+            rgba[..., 3] *= sub_rgba[..., 3]  # multiply alpha
+            mask_bad |= sub_mask_bad
+
+        if self.combination_mode == 'sRGB_sub':
+            rgba[..., :3] -= len(self) - 1
+
+        rgba[mask_bad] = self.get_bad()
+
+        if clip:
+            rgba = np.clip(rgba, 0, 1)
+
+        if alpha is not None:
+            if clip:
+                alpha = np.clip(alpha, 0, 1)
+            if np.shape(alpha) not in [(), np.shape(X[0])]:
+                raise ValueError(
+                    f"alpha is array-like but its shape {np.shape(alpha)} does "
+                    f"not match that of X[0] {np.shape(X[0])}")
+            rgba[..., -1] *= alpha
+
+        if bytes:
+            if not clip:
+                raise ValueError(
+                    "clip cannot be false while bytes is true"
+                    " as uint8 does not support values below 0"
+                    " or above 255.")
+            rgba = (rgba * 255).astype('uint8')
+
+        if not np.iterable(X[0]):
+            rgba = tuple(rgba)
+
+        return rgba
+
+    def copy(self):
+        """Return a copy of the multivarcolormap."""
+        return self.__copy__()
+
+    def __copy__(self):
+        cls = self.__class__
+        cmapobject = cls.__new__(cls)
+        cmapobject.__dict__.update(self.__dict__)
+        cmapobject._colormaps = [cm.copy() for cm in self._colormaps]
+        cmapobject._rgba_bad = np.copy(self._rgba_bad)
+        return cmapobject
+
+    def __eq__(self, other):
+        if not isinstance(other, MultivarColormap):
+            return False
+        if len(self) != len(other):
+            return False
+        for c0, c1 in zip(self, other):
+            if c0 != c1:
+                return False
+        if not all(self._rgba_bad == other._rgba_bad):
+            return False
+        if self.combination_mode != other.combination_mode:
+            return False
+        return True
+
+    def __getitem__(self, item):
+        return self._colormaps[item]
+
+    def __iter__(self):
+        for c in self._colormaps:
+            yield c
+
+    def __len__(self):
+        return len(self._colormaps)
+
+    def __str__(self):
+        return self.name
+
+    def get_bad(self):
+        """Get the color for masked values."""
+        return np.array(self._rgba_bad)
+
+    def resampled(self, lutshape):
+        """
+        Return a new colormap with *lutshape* entries.
+
+        Parameters
+        ----------
+        lutshape : tuple of (`int`, `None`)
+            The tuple must have a length matching the number of variates.
+            For each element in the tuple, if `int`, the corresponding colorbar
+            is resampled, if `None`, the corresponding colorbar is not resampled.
+
+        Returns
+        -------
+        MultivarColormap
+        """
+
+        if not np.iterable(lutshape) or len(lutshape) != len(self):
+            raise ValueError(f"lutshape must be of length {len(self)}")
+        new_cmap = self.copy()
+        for i, s in enumerate(lutshape):
+            if s is not None:
+                new_cmap._colormaps[i] = self[i].resampled(s)
+        return new_cmap
+
+    def with_extremes(self, *, bad=None, under=None, over=None):
+        """
+        Return a copy of the `MultivarColormap` with modified out-of-range attributes.
+
+        The *bad* keyword modifies the copied `MultivarColormap` while *under* and
+        *over* modifies the attributes of the copied component colormaps.
+        Note that *under* and *over* colors are subject to the mixing rules determined
+        by the *combination_mode*.
+
+        Parameters
+        ----------
+        bad : :mpltype:`color`, default: None
+            If Matplotlib color, the bad value is set accordingly in the copy
+
+        under : tuple of :mpltype:`color`, default: None
+            If tuple, the 'under' value of each component is set with the values
+            from the tuple.
+
+        over : tuple of :mpltype:`color`, default: None
+            If tuple, the 'over' value of each component is set with the values
+            from the tuple.
+
+        Returns
+        -------
+        MultivarColormap
+            copy of self with attributes set
+
+        """
+        new_cm = self.copy()
+        if bad is not None:
+            new_cm._rgba_bad = to_rgba(bad)
+        if under is not None:
+            if not np.iterable(under) or len(under) != len(new_cm):
+                raise ValueError("*under* must contain a color for each scalar colormap"
+                                 f" i.e. be of length {len(new_cm)}.")
+            else:
+                for c, b in zip(new_cm, under):
+                    # in-place change is ok, since we've just created c as a copy
+                    c._set_extremes(under=b)
+        if over is not None:
+            if not np.iterable(over) or len(over) != len(new_cm):
+                raise ValueError("*over* must contain a color for each scalar colormap"
+                                 f" i.e. be of length {len(new_cm)}.")
+            else:
+                for c, b in zip(new_cm, over):
+                    # in-place change is ok, since we've just created c as a copy
+                    c._set_extremes(over=b)
+        return new_cm
+
+    @property
+    def combination_mode(self):
+        return self._combination_mode
+
+    def _repr_png_(self):
+        """Generate a PNG representation of the Colormap."""
+        X = np.tile(np.linspace(0, 1, _REPR_PNG_SIZE[0]),
+                                (_REPR_PNG_SIZE[1], 1))
+        pixels = np.zeros((_REPR_PNG_SIZE[1]*len(self), _REPR_PNG_SIZE[0], 4),
+                          dtype=np.uint8)
+        for i, c in enumerate(self):
+            pixels[i*_REPR_PNG_SIZE[1]:(i+1)*_REPR_PNG_SIZE[1], :] = c(X, bytes=True)
+        png_bytes = io.BytesIO()
+        title = self.name + ' multivariate colormap'
+        author = f'Matplotlib v{mpl.__version__}, https://matplotlib.org'
+        pnginfo = PngInfo()
+        pnginfo.add_text('Title', title)
+        pnginfo.add_text('Description', title)
+        pnginfo.add_text('Author', author)
+        pnginfo.add_text('Software', author)
+        Image.fromarray(pixels).save(png_bytes, format='png', pnginfo=pnginfo)
+        return png_bytes.getvalue()
+
+    def _repr_html_(self):
+        """Generate an HTML representation of the MultivarColormap."""
+        return ''.join([c._repr_html_() for c in self._colormaps])
+
+
+class BivarColormap:
+    """
+    Base class for all bivariate to RGBA mappings.
+
+    Designed as a drop-in replacement for Colormap when using a 2D
+    lookup table. To be used with `~matplotlib.cm.ScalarMappable`.
+    """
+
+    def __init__(self, N=256, M=256, shape='square', origin=(0, 0),
+                 name='bivariate colormap'):
+        """
+        Parameters
+        ----------
+        N : int, default: 256
+            The number of RGB quantization levels along the first axis.
+        M : int, default: 256
+            The number of RGB quantization levels along the second axis.
+        shape : {'square', 'circle', 'ignore', 'circleignore'}
+
+            - 'square' each variate is clipped to [0,1] independently
+            - 'circle' the variates are clipped radially to the center
+              of the colormap, and a circular mask is applied when the colormap
+              is displayed
+            - 'ignore' the variates are not clipped, but instead assigned the
+              'outside' color
+            - 'circleignore' a circular mask is applied, but the data is not
+              clipped and instead assigned the 'outside' color
+
+        origin : (float, float), default: (0,0)
+            The relative origin of the colormap. Typically (0, 0), for colormaps
+            that are linear on both axis, and (.5, .5) for circular colormaps.
+            Used when getting 1D colormaps from 2D colormaps.
+        name : str, optional
+            The name of the colormap.
+        """
+
+        self.name = name
+        self.N = int(N)  # ensure that N is always int
+        self.M = int(M)
+        _api.check_in_list(['square', 'circle', 'ignore', 'circleignore'], shape=shape)
+        self._shape = shape
+        self._rgba_bad = (0.0, 0.0, 0.0, 0.0)  # If bad, don't paint anything.
+        self._rgba_outside = (1.0, 0.0, 1.0, 1.0)
+        self._isinit = False
+        self.n_variates = 2
+        self._origin = (float(origin[0]), float(origin[1]))
+        '''#: When this colormap exists on a scalar mappable and colorbar_extend
+        #: is not False, colorbar creation will pick up ``colorbar_extend`` as
+        #: the default value for the ``extend`` keyword in the
+        #: `matplotlib.colorbar.Colorbar` constructor.
+        self.colorbar_extend = False'''
+
+    def __call__(self, X, alpha=None, bytes=False):
+        r"""
+        Parameters
+        ----------
+        X : tuple (X0, X1), X0 and X1: float or int or array-like
+            The data value(s) to convert to RGBA.
+
+            - For floats, *X* should be in the interval ``[0.0, 1.0]`` to
+              return the RGBA values ``X*100`` percent along the Colormap.
+            - For integers, *X* should be in the interval ``[0, Colormap.N)`` to
+              return RGBA values *indexed* from the Colormap with index ``X``.
+
+        alpha : float or array-like or None, default: None
+            Alpha must be a scalar between 0 and 1, a sequence of such
+            floats with shape matching X0, or None.
+        bytes : bool, default: False
+            If False (default), the returned RGBA values will be floats in the
+            interval ``[0, 1]`` otherwise they will be `numpy.uint8`\s in the
+            interval ``[0, 255]``.
+
+        Returns
+        -------
+        Tuple of RGBA values if X is scalar, otherwise an array of
+        RGBA values with a shape of ``X.shape + (4, )``.
+        """
+
+        if len(X) != 2:
+            raise ValueError(
+                f'For a `BivarColormap` the data must have a first dimension '
+                f'2, not {len(X)}')
+
+        if not self._isinit:
+            self._init()
+
+        X0 = np.ma.array(X[0], copy=True)
+        X1 = np.ma.array(X[1], copy=True)
+        # clip to shape of colormap, circle square, etc.
+        self._clip((X0, X1))
+
+        # Native byteorder is faster.
+        if not X0.dtype.isnative:
+            X0 = X0.byteswap().view(X0.dtype.newbyteorder())
+        if not X1.dtype.isnative:
+            X1 = X1.byteswap().view(X1.dtype.newbyteorder())
+
+        if X0.dtype.kind == "f":
+            X0 *= self.N
+            # xa == 1 (== N after multiplication) is not out of range.
+            X0[X0 == self.N] = self.N - 1
+
+        if X1.dtype.kind == "f":
+            X1 *= self.M
+            # xa == 1 (== N after multiplication) is not out of range.
+            X1[X1 == self.M] = self.M - 1
+
+        # Pre-compute the masks before casting to int (which can truncate)
+        mask_outside = (X0 < 0) | (X1 < 0) | (X0 >= self.N) | (X1 >= self.M)
+        # If input was masked, get the bad mask from it; else mask out nans.
+        mask_bad_0 = X0.mask if np.ma.is_masked(X0) else np.isnan(X0)
+        mask_bad_1 = X1.mask if np.ma.is_masked(X1) else np.isnan(X1)
+        mask_bad = mask_bad_0 | mask_bad_1
+
+        with np.errstate(invalid="ignore"):
+            # We need this cast for unsigned ints as well as floats
+            X0 = X0.astype(int)
+            X1 = X1.astype(int)
+
+        # Set masked values to zero
+        # The corresponding rgb values will be replaced later
+        for X_part in [X0, X1]:
+            X_part[mask_outside] = 0
+            X_part[mask_bad] = 0
+
+        rgba = self._lut[X0, X1]
+        if np.isscalar(X[0]):
+            rgba = np.copy(rgba)
+        rgba[mask_outside] = self._rgba_outside
+        rgba[mask_bad] = self._rgba_bad
+        if bytes:
+            rgba = (rgba * 255).astype(np.uint8)
+        if alpha is not None:
+            alpha = np.clip(alpha, 0, 1)
+            if bytes:
+                alpha *= 255  # Will be cast to uint8 upon assignment.
+            if np.shape(alpha) not in [(), np.shape(X0)]:
+                raise ValueError(
+                    f"alpha is array-like but its shape {np.shape(alpha)} does "
+                    f"not match that of X[0] {np.shape(X0)}")
+            rgba[..., -1] = alpha
+            # If the "bad" color is all zeros, then ignore alpha input.
+            if (np.array(self._rgba_bad) == 0).all():
+                rgba[mask_bad] = (0, 0, 0, 0)
+
+        if not np.iterable(X[0]):
+            rgba = tuple(rgba)
+        return rgba
+
+    @property
+    def lut(self):
+        """
+        For external access to the lut, i.e. for displaying the cmap.
+        For circular colormaps this returns a lut with a circular mask.
+
+        Internal functions (such as to_rgb()) should use _lut
+        which stores the lut without a circular mask
+        A lut without the circular mask is needed in to_rgb() because the
+        conversion from floats to ints results in some some pixel-requests
+        just outside of the circular mask
+
+        """
+        if not self._isinit:
+            self._init()
+        lut = np.copy(self._lut)
+        if self.shape == 'circle' or self.shape == 'circleignore':
+            n = np.linspace(-1, 1, self.N)
+            m = np.linspace(-1, 1, self.M)
+            radii_sqr = (n**2)[:, np.newaxis] + (m**2)[np.newaxis, :]
+            mask_outside = radii_sqr > 1
+            lut[mask_outside, 3] = 0
+        return lut
+
+    def __copy__(self):
+        cls = self.__class__
+        cmapobject = cls.__new__(cls)
+        cmapobject.__dict__.update(self.__dict__)
+
+        cmapobject._rgba_outside = np.copy(self._rgba_outside)
+        cmapobject._rgba_bad = np.copy(self._rgba_bad)
+        cmapobject._shape = self.shape
+        if self._isinit:
+            cmapobject._lut = np.copy(self._lut)
+        return cmapobject
+
+    def __eq__(self, other):
+        if not isinstance(other, BivarColormap):
+            return False
+        # To compare lookup tables the Colormaps have to be initialized
+        if not self._isinit:
+            self._init()
+        if not other._isinit:
+            other._init()
+        if not np.array_equal(self._lut, other._lut):
+            return False
+        if not np.array_equal(self._rgba_bad, other._rgba_bad):
+            return False
+        if not np.array_equal(self._rgba_outside, other._rgba_outside):
+            return False
+        if self.shape != other.shape:
+            return False
+        return True
+
+    def get_bad(self):
+        """Get the color for masked values."""
+        return self._rgba_bad
+
+    def get_outside(self):
+        """Get the color for out-of-range values."""
+        return self._rgba_outside
+
+    def resampled(self, lutshape, transposed=False):
+        """
+        Return a new colormap with *lutshape* entries.
+
+        Note that this function does not move the origin.
+
+        Parameters
+        ----------
+        lutshape : tuple of ints or None
+            The tuple must be of length 2, and each entry is either an int or None.
+
+            - If an int, the corresponding axis is resampled.
+            - If negative the corresponding axis is resampled in reverse
+            - If -1, the axis is inverted
+            - If 1 or None, the corresponding axis is not resampled.
+
+        transposed : bool, default: False
+            if True, the axes are swapped after resampling
+
+        Returns
+        -------
+        BivarColormap
+        """
+
+        if not np.iterable(lutshape) or len(lutshape) != 2:
+            raise ValueError("lutshape must be of length 2")
+        lutshape = [lutshape[0], lutshape[1]]
+        if lutshape[0] is None or lutshape[0] == 1:
+            lutshape[0] = self.N
+        if lutshape[1] is None or lutshape[1] == 1:
+            lutshape[1] = self.M
+
+        inverted = [False, False]
+        if lutshape[0] < 0:
+            inverted[0] = True
+            lutshape[0] = -lutshape[0]
+            if lutshape[0] == 1:
+                lutshape[0] = self.N
+        if lutshape[1] < 0:
+            inverted[1] = True
+            lutshape[1] = -lutshape[1]
+            if lutshape[1] == 1:
+                lutshape[1] = self.M
+        x_0, x_1 = np.mgrid[0:1:(lutshape[0] * 1j), 0:1:(lutshape[1] * 1j)]
+        if inverted[0]:
+            x_0 = x_0[::-1, :]
+        if inverted[1]:
+            x_1 = x_1[:, ::-1]
+
+        # we need to use shape = 'square' while resampling the colormap.
+        # if the colormap has shape = 'circle' we would otherwise get *outside* in the
+        # resampled colormap
+        shape_memory = self._shape
+        self._shape = 'square'
+        if transposed:
+            new_lut = self((x_1, x_0))
+            new_cmap = BivarColormapFromImage(new_lut, name=self.name,
+                                              shape=shape_memory,
+                                              origin=self.origin[::-1])
+        else:
+            new_lut = self((x_0, x_1))
+            new_cmap = BivarColormapFromImage(new_lut, name=self.name,
+                                              shape=shape_memory,
+                                              origin=self.origin)
+        self._shape = shape_memory
+
+        new_cmap._rgba_bad = self._rgba_bad
+        new_cmap._rgba_outside = self._rgba_outside
+        return new_cmap
+
+    def reversed(self, axis_0=True, axis_1=True):
+        """
+        Reverses both or one of the axis.
+        """
+        r_0 = -1 if axis_0 else 1
+        r_1 = -1 if axis_1 else 1
+        return self.resampled((r_0, r_1))
+
+    def transposed(self):
+        """
+        Transposes the colormap by swapping the order of the axis
+        """
+        return self.resampled((None, None), transposed=True)
+
+    def with_extremes(self, *, bad=None, outside=None, shape=None, origin=None):
+        """
+        Return a copy of the `BivarColormap` with modified attributes.
+
+        Note that the *outside* color is only relevant if `shape` = 'ignore'
+        or 'circleignore'.
+
+        Parameters
+        ----------
+        bad : :mpltype:`color`, optional
+            If given, the *bad* value is set accordingly in the copy.
+
+        outside : :mpltype:`color`, optional
+            If given and shape is 'ignore' or 'circleignore', values
+            *outside* the colormap are colored accordingly in the copy.
+
+        shape : {'square', 'circle', 'ignore', 'circleignore'}
+
+            - If 'square' each variate is clipped to [0,1] independently
+            - If 'circle' the variates are clipped radially to the center
+              of the colormap, and a circular mask is applied when the colormap
+              is displayed
+            - If 'ignore' the variates are not clipped, but instead assigned the
+              *outside* color
+            - If 'circleignore' a circular mask is applied, but the data is not
+              clipped and instead assigned the *outside* color
+
+        origin : (float, float)
+            The relative origin of the colormap. Typically (0, 0), for colormaps
+            that are linear on both axis, and (.5, .5) for circular colormaps.
+            Used when getting 1D colormaps from 2D colormaps.
+
+        Returns
+        -------
+        BivarColormap
+            copy of self with attributes set
+        """
+        new_cm = self.copy()
+        if bad is not None:
+            new_cm._rgba_bad = to_rgba(bad)
+        if outside is not None:
+            new_cm._rgba_outside = to_rgba(outside)
+        if shape is not None:
+            _api.check_in_list(['square', 'circle', 'ignore', 'circleignore'],
+                               shape=shape)
+            new_cm._shape = shape
+        if origin is not None:
+            new_cm._origin = (float(origin[0]), float(origin[1]))
+
+        return new_cm
+
+    def _init(self):
+        """Generate the lookup table, ``self._lut``."""
+        raise NotImplementedError("Abstract class only")
+
+    @property
+    def shape(self):
+        return self._shape
+
+    @property
+    def origin(self):
+        return self._origin
+
+    def _clip(self, X):
+        """
+        For internal use when applying a BivarColormap to data.
+        i.e. cm.ScalarMappable().to_rgba()
+        Clips X[0] and X[1] according to 'self.shape'.
+        X is modified in-place.
+
+        Parameters
+        ----------
+        X : np.array
+            array of floats or ints to be clipped
+        shape : {'square', 'circle', 'ignore', 'circleignore'}
+
+            - If 'square' each variate is clipped to [0,1] independently
+            - If 'circle' the variates are clipped radially to the center
+              of the colormap.
+              It is assumed that a circular mask is applied when the colormap
+              is displayed
+            - If 'ignore' the variates are not clipped, but instead assigned the
+              'outside' color
+            - If 'circleignore' a circular mask is applied, but the data is not clipped
+              and instead assigned the 'outside' color
+
+        """
+        if self.shape == 'square':
+            for X_part, mx in zip(X, (self.N, self.M)):
+                X_part[X_part < 0] = 0
+                if X_part.dtype.kind == "f":
+                    X_part[X_part > 1] = 1
+                else:
+                    X_part[X_part >= mx] = mx - 1
+
+        elif self.shape == 'ignore':
+            for X_part, mx in zip(X, (self.N, self.M)):
+                X_part[X_part < 0] = -1
+                if X_part.dtype.kind == "f":
+                    X_part[X_part > 1] = -1
+                else:
+                    X_part[X_part >= mx] = -1
+
+        elif self.shape == 'circle' or self.shape == 'circleignore':
+            for X_part in X:
+                if X_part.dtype.kind != "f":
+                    raise NotImplementedError(
+                        "Circular bivariate colormaps are only"
+                        " implemented for use with with floats")
+            radii_sqr = (X[0] - 0.5)**2 + (X[1] - 0.5)**2
+            mask_outside = radii_sqr > 0.25
+            if self.shape == 'circle':
+                overextend = 2 * np.sqrt(radii_sqr[mask_outside])
+                X[0][mask_outside] = (X[0][mask_outside] - 0.5) / overextend + 0.5
+                X[1][mask_outside] = (X[1][mask_outside] - 0.5) / overextend + 0.5
+            else:
+                X[0][mask_outside] = -1
+                X[1][mask_outside] = -1
+
+    def __getitem__(self, item):
+        """Creates and returns a colorbar along the selected axis"""
+        if not self._isinit:
+            self._init()
+        extremes = (
+            dict(bad=self._rgba_bad, over=self._rgba_outside, under=self._rgba_outside)
+            if self.shape in ['ignore', 'circleignore']
+            else dict(bad=self._rgba_bad)
+        )
+        if item == 0:
+            origin_1_as_int = int(self._origin[1]*self.M)
+            if origin_1_as_int > self.M-1:
+                origin_1_as_int = self.M-1
+            one_d_lut = self._lut[:, origin_1_as_int]
+            new_cmap = ListedColormap(one_d_lut, name=f'{self.name}_0', **extremes)
+
+        elif item == 1:
+            origin_0_as_int = int(self._origin[0]*self.N)
+            if origin_0_as_int > self.N-1:
+                origin_0_as_int = self.N-1
+            one_d_lut = self._lut[origin_0_as_int, :]
+            new_cmap = ListedColormap(one_d_lut, name=f'{self.name}_1', **extremes)
+        else:
+            raise KeyError(f"only 0 or 1 are"
+                           f" valid keys for BivarColormap, not {item!r}")
+        return new_cmap
+
+    def _repr_png_(self):
+        """Generate a PNG representation of the BivarColormap."""
+        if not self._isinit:
+            self._init()
+        pixels = self.lut
+        if pixels.shape[0] < _BIVAR_REPR_PNG_SIZE:
+            pixels = np.repeat(pixels,
+                               repeats=_BIVAR_REPR_PNG_SIZE//pixels.shape[0],
+                               axis=0)[:256, :]
+        if pixels.shape[1] < _BIVAR_REPR_PNG_SIZE:
+            pixels = np.repeat(pixels,
+                               repeats=_BIVAR_REPR_PNG_SIZE//pixels.shape[1],
+                               axis=1)[:, :256]
+        pixels = (pixels[::-1, :, :] * 255).astype(np.uint8)
+        png_bytes = io.BytesIO()
+        title = self.name + ' BivarColormap'
+        author = f'Matplotlib v{mpl.__version__}, https://matplotlib.org'
+        pnginfo = PngInfo()
+        pnginfo.add_text('Title', title)
+        pnginfo.add_text('Description', title)
+        pnginfo.add_text('Author', author)
+        pnginfo.add_text('Software', author)
+        Image.fromarray(pixels).save(png_bytes, format='png', pnginfo=pnginfo)
+        return png_bytes.getvalue()
+
+    def _repr_html_(self):
+        """Generate an HTML representation of the Colormap."""
+        png_bytes = self._repr_png_()
+        png_base64 = base64.b64encode(png_bytes).decode('ascii')
+        def color_block(color):
+            hex_color = to_hex(color, keep_alpha=True)
+            return (f'<div title="{hex_color}" '
+                    'style="display: inline-block; '
+                    'width: 1em; height: 1em; '
+                    'margin: 0; '
+                    'vertical-align: middle; '
+                    'border: 1px solid #555; '
+                    f'background-color: {hex_color};"></div>')
+
+        return ('<div style="vertical-align: middle;">'
+                f'<strong>{self.name}</strong> '
+                '</div>'
+                '<div class="cmap"><img '
+                f'alt="{self.name} BivarColormap" '
+                f'title="{self.name}" '
+                'style="border: 1px solid #555;" '
+                f'src="data:image/png;base64,{png_base64}"></div>'
+                '<div style="vertical-align: middle; '
+                f'max-width: {_BIVAR_REPR_PNG_SIZE+2}px; '
+                'display: flex; justify-content: space-between;">'
+                '<div style="float: left;">'
+                f'{color_block(self.get_outside())} outside'
+                '</div>'
+                '<div style="float: right;">'
+                f'bad {color_block(self.get_bad())}'
+                '</div></div>')
+
+    def copy(self):
+        """Return a copy of the colormap."""
+        return self.__copy__()
+
+
+class SegmentedBivarColormap(BivarColormap):
+    """
+    BivarColormap object generated by supersampling a regular grid.
+
+    Parameters
+    ----------
+    patch : np.array
+        Patch is required to have a shape (k, l, 3), and will get supersampled
+        to a lut of shape (N, N, 4).
+    N : int
+        The number of RGB quantization levels along each axis.
+    shape : {'square', 'circle', 'ignore', 'circleignore'}
+
+        - If 'square' each variate is clipped to [0,1] independently
+        - If 'circle' the variates are clipped radially to the center
+          of the colormap, and a circular mask is applied when the colormap
+          is displayed
+        - If 'ignore' the variates are not clipped, but instead assigned the
+          'outside' color
+        - If 'circleignore' a circular mask is applied, but the data is not clipped
+
+    origin : (float, float)
+        The relative origin of the colormap. Typically (0, 0), for colormaps
+        that are linear on both axis, and (.5, .5) for circular colormaps.
+        Used when getting 1D colormaps from 2D colormaps.
+
+    name : str, optional
+        The name of the colormap.
+    """
+
+    def __init__(self, patch, N=256, shape='square', origin=(0, 0),
+                 name='segmented bivariate colormap'):
+        _api.check_shape((None, None, 3), patch=patch)
+        self.patch = patch
+        super().__init__(N, N, shape, origin, name=name)
+
+    def _init(self):
+        # Perform bilinear interpolation
+
+        s = self.patch.shape
+
+        # Indices (whole and fraction) of the new grid points
+        row = np.linspace(0, s[0] - 1, self.N)[:, np.newaxis]
+        col = np.linspace(0, s[1] - 1, self.N)[np.newaxis, :]
+        left = row.astype(int)  # floor not needed because all values are nonnegative
+        top = col.astype(int)  # floor not needed because all values are nonnegative
+        row_frac = (row - left)[:, :, np.newaxis]
+        col_frac = (col - top)[:, :, np.newaxis]
+
+        # Indices of the next edges, clipping where needed
+        right = np.clip(left + 1, 0, s[0] - 1)
+        bottom = np.clip(top + 1, 0, s[1] - 1)
+
+        # Values at the corners
+        tl = self.patch[left, top, :]
+        tr = self.patch[right, top, :]
+        bl = self.patch[left, bottom, :]
+        br = self.patch[right, bottom, :]
+
+        # Interpolate between the corners
+        lut = (tl * (1 - row_frac) * (1 - col_frac) +
+               tr * row_frac * (1 - col_frac) +
+               bl * (1 - row_frac) * col_frac +
+               br * row_frac * col_frac)
+
+        # Add the alpha channel
+        self._lut = np.concatenate([lut, np.ones((self.N, self.N, 1))], axis=2)
+
+        self._isinit = True
+
+
+class BivarColormapFromImage(BivarColormap):
+    """
+    BivarColormap object generated by supersampling a regular grid.
+
+    Parameters
+    ----------
+    lut : nparray of shape (N, M, 3) or (N, M, 4)
+        The look-up-table
+    shape : {'square', 'circle', 'ignore', 'circleignore'}
+
+        - If 'square' each variate is clipped to [0,1] independently
+        - If 'circle' the variates are clipped radially to the center
+          of the colormap, and a circular mask is applied when the colormap
+          is displayed
+        - If 'ignore' the variates are not clipped, but instead assigned the
+          'outside' color
+        - If 'circleignore' a circular mask is applied, but the data is not clipped
+
+    origin : (float, float)
+        The relative origin of the colormap. Typically (0, 0), for colormaps
+        that are linear on both axis, and (.5, .5) for circular colormaps.
+        Used when getting 1D colormaps from 2D colormaps.
+    name : str, optional
+        The name of the colormap.
+
+    """
+
+    def __init__(self, lut, shape='square', origin=(0, 0), name='from image'):
+        # We can allow for a PIL.Image as input in the following way, but importing
+        # matplotlib.image.pil_to_array() results in a circular import
+        # For now, this function only accepts numpy arrays.
+        # i.e.:
+        # if isinstance(Image, lut):
+        #    lut = image.pil_to_array(lut)
+        lut = np.array(lut, copy=True)
+        if lut.ndim != 3 or lut.shape[2] not in (3, 4):
+            raise ValueError("The lut must be an array of shape (n, m, 3) or (n, m, 4)",
+                             " or a PIL.image encoded as RGB or RGBA")
+
+        if lut.dtype == np.uint8:
+            lut = lut.astype(np.float32)/255
+        if lut.shape[2] == 3:
+            new_lut = np.empty((lut.shape[0], lut.shape[1], 4), dtype=lut.dtype)
+            new_lut[:, :, :3] = lut
+            new_lut[:, :, 3] = 1.
+            lut = new_lut
+        self._lut = lut
+        super().__init__(lut.shape[0], lut.shape[1], shape, origin, name=name)
+
+    def _init(self):
+        self._isinit = True
+
+
+class Norm(ABC):
+    """
+    Abstract base class for normalizations.
+
+    Subclasses include `Normalize` which maps from a scalar to
+    a scalar. However, this class makes no such requirement, and subclasses may
+    support the normalization of multiple variates simultaneously, with
+    separate normalization for each variate.
+    """
+
+    def __init__(self):
+        self.callbacks = cbook.CallbackRegistry(signals=["changed"])
+
+    @property
+    @abstractmethod
+    def vmin(self):
+        """Lower limit of the input data interval; maps to 0."""
+        pass
+
+    @property
+    @abstractmethod
+    def vmax(self):
+        """Upper limit of the input data interval; maps to 1."""
+        pass
+
+    @property
+    @abstractmethod
+    def clip(self):
+        """
+        Determines the behavior for mapping values outside the range ``[vmin, vmax]``.
+
+        See the *clip* parameter in `.Normalize`.
+        """
+        pass
+
+    @abstractmethod
+    def __call__(self, value, clip=None):
+        """
+        Normalize the data and return the normalized data.
+
+        Parameters
+        ----------
+        value
+            Data to normalize.
+        clip : bool, optional
+            See the description of the parameter *clip* in `.Normalize`.
+
+            If ``None``, defaults to ``self.clip`` (which defaults to
+            ``False``).
+
+        Notes
+        -----
+        If not already initialized, ``self.vmin`` and ``self.vmax`` are
+        initialized using ``self.autoscale_None(value)``.
+        """
+        pass
+
+    @abstractmethod
+    def autoscale(self, A):
+        """Set *vmin*, *vmax* to min, max of *A*."""
+        pass
+
+    @abstractmethod
+    def autoscale_None(self, A):
+        """If *vmin* or *vmax* are not set, use the min/max of *A* to set them."""
+        pass
+
+    @abstractmethod
+    def scaled(self):
+        """Return whether *vmin* and *vmax* are both set."""
+        pass
+
+    def _changed(self):
+        """
+        Call this whenever the norm is changed to notify all the
+        callback listeners to the 'changed' signal.
+        """
+        self.callbacks.process('changed')
+
+    @property
+    @abstractmethod
+    def n_components(self):
+        """
+        The number of normalized components.
+
+        This is the number of elements of the parameter to ``__call__`` and of
+        *vmin*, *vmax*.
+        """
+        pass
+
+
+class Normalize(Norm):
+    """
+    A class which, when called, maps values within the interval
+    ``[vmin, vmax]`` linearly to the interval ``[0.0, 1.0]``. The mapping of
+    values outside ``[vmin, vmax]`` depends on *clip*.
+
+    Examples
+    --------
+    ::
+
+        x = [-2, -1, 0, 1, 2]
+
+        norm = mpl.colors.Normalize(vmin=-1, vmax=1, clip=False)
+        norm(x)  # [-0.5, 0., 0.5, 1., 1.5]
+        norm = mpl.colors.Normalize(vmin=-1, vmax=1, clip=True)
+        norm(x)  # [0., 0., 0.5, 1., 1.]
+
+    See Also
+    --------
+    :ref:`colormapnorms`
     """
 
     def __init__(self, vmin=None, vmax=None, clip=False):
@@ -1109,31 +2429,38 @@ class Normalize:
         Parameters
         ----------
         vmin, vmax : float or None
-            If *vmin* and/or *vmax* is not given, they are initialized from the
-            minimum and maximum value, respectively, of the first input
-            processed; i.e., ``__call__(A)`` calls ``autoscale_None(A)``.
+            Values within the range ``[vmin, vmax]`` from the input data will be
+            linearly mapped to ``[0, 1]``. If either *vmin* or *vmax* is not
+            provided, they default to the minimum and maximum values of the input,
+            respectively.
 
         clip : bool, default: False
-            If ``True`` values falling outside the range ``[vmin, vmax]``,
-            are mapped to 0 or 1, whichever is closer, and masked values are
-            set to 1.  If ``False`` masked values remain masked.
+            Determines the behavior for mapping values outside the range
+            ``[vmin, vmax]``.
 
-            Clipping silently defeats the purpose of setting the over, under,
-            and masked colors in a colormap, so it is likely to lead to
-            surprises; therefore the default is ``clip=False``.
+            If clipping is off, values outside the range ``[vmin, vmax]`` are
+            also transformed, resulting in values outside ``[0, 1]``.  This
+            behavior is usually desirable, as colormaps can mark these *under*
+            and *over* values with specific colors.
+
+            If clipping is on, values below *vmin* are mapped to 0 and values
+            above *vmax* are mapped to 1. Such values become indistinguishable
+            from regular boundary values, which may cause misinterpretation of
+            the data.
 
         Notes
         -----
-        Returns 0 if ``vmin == vmax``.
+        If ``vmin == vmax``, input data will be mapped to 0.
         """
+        super().__init__()
         self._vmin = _sanitize_extrema(vmin)
         self._vmax = _sanitize_extrema(vmax)
         self._clip = clip
         self._scale = None
-        self.callbacks = cbook.CallbackRegistry()
 
     @property
     def vmin(self):
+        # docstring inherited
         return self._vmin
 
     @vmin.setter
@@ -1145,6 +2472,7 @@ class Normalize:
 
     @property
     def vmax(self):
+        # docstring inherited
         return self._vmax
 
     @vmax.setter
@@ -1156,6 +2484,7 @@ class Normalize:
 
     @property
     def clip(self):
+        # docstring inherited
         return self._clip
 
     @clip.setter
@@ -1164,19 +2493,17 @@ class Normalize:
             self._clip = value
             self._changed()
 
-    def _changed(self):
-        """
-        Call this whenever the norm is changed to notify all the
-        callback listeners to the 'changed' signal.
-        """
-        self.callbacks.process('changed')
-
     @staticmethod
     def process_value(value):
         """
         Homogenize the input *value* for easy and efficient normalization.
 
         *value* can be a scalar or sequence.
+
+        Parameters
+        ----------
+        value
+            Data to normalize.
 
         Returns
         -------
@@ -1207,23 +2534,7 @@ class Normalize:
         return result, is_scalar
 
     def __call__(self, value, clip=None):
-        """
-        Normalize *value* data in the ``[vmin, vmax]`` interval into the
-        ``[0.0, 1.0]`` interval and return it.
-
-        Parameters
-        ----------
-        value
-            Data to normalize.
-        clip : bool
-            If ``None``, defaults to ``self.clip`` (which defaults to
-            ``False``).
-
-        Notes
-        -----
-        If not already initialized, ``self.vmin`` and ``self.vmax`` are
-        initialized using ``self.autoscale_None(value)``.
-        """
+        # docstring inherited
         if clip is None:
             clip = self.clip
 
@@ -1253,6 +2564,15 @@ class Normalize:
         return result
 
     def inverse(self, value):
+        """
+        Maps the normalized value (i.e., index in the colormap) back to image
+        data value.
+
+        Parameters
+        ----------
+        value
+            Normalized value.
+        """
         if not self.scaled():
             raise ValueError("Not invertible until both vmin and vmax are set")
         (vmin,), _ = self.process_value(self.vmin)
@@ -1265,22 +2585,44 @@ class Normalize:
             return vmin + value * (vmax - vmin)
 
     def autoscale(self, A):
-        """Set *vmin*, *vmax* to min, max of *A*."""
-        A = np.asanyarray(A)
-        self.vmin = A.min()
-        self.vmax = A.max()
+        # docstring inherited
+        with self.callbacks.blocked():
+            # Pause callbacks while we are updating so we only get
+            # a single update signal at the end
+            self.vmin = self.vmax = None
+            self.autoscale_None(A)
+        self._changed()
 
     def autoscale_None(self, A):
-        """If vmin or vmax are not set, use the min/max of *A* to set them."""
+        # docstring inherited
         A = np.asanyarray(A)
+
+        if isinstance(A, np.ma.MaskedArray):
+            # we need to make the distinction between an array, False, np.bool_(False)
+            if A.mask is False or not A.mask.shape:
+                A = A.data
+
         if self.vmin is None and A.size:
             self.vmin = A.min()
         if self.vmax is None and A.size:
             self.vmax = A.max()
 
     def scaled(self):
-        """Return whether vmin and vmax are set."""
+        # docstring inherited
         return self.vmin is not None and self.vmax is not None
+
+    @property
+    def n_components(self):
+        """
+        The number of distinct components supported (1).
+
+        This is the number of elements of the parameter to ``__call__`` and of
+        *vmin*, *vmax*.
+
+        This class support only a single component, as opposed to `MultiNorm`
+        which supports multiple components.
+        """
+        return 1
 
 
 class TwoSlopeNorm(Normalize):
@@ -1310,7 +2652,7 @@ class TwoSlopeNorm(Normalize):
 
             >>> import matplotlib.colors as mcolors
             >>> offset = mcolors.TwoSlopeNorm(vmin=-4000.,
-                                              vcenter=0., vmax=10000)
+            ...                               vcenter=0., vmax=10000)
             >>> data = [-4000., -2000., 0., 2500., 5000., 7500., 10000.]
             >>> offset(data)
             array([0., 0.25, 0.5, 0.625, 0.75, 0.875, 1.0])
@@ -1337,17 +2679,21 @@ class TwoSlopeNorm(Normalize):
 
     def autoscale_None(self, A):
         """
-        Get vmin and vmax, and then clip at vcenter
+        Get vmin and vmax.
+
+        If vcenter isn't in the range [vmin, vmax], either vmin or vmax
+        is expanded so that vcenter lies in the middle of the modified range
+        [vmin, vmax].
         """
         super().autoscale_None(A)
-        if self.vmin > self.vcenter:
-            self.vmin = self.vcenter
-        if self.vmax < self.vcenter:
-            self.vmax = self.vcenter
+        if self.vmin >= self.vcenter:
+            self.vmin = self.vcenter - (self.vmax - self.vcenter)
+        if self.vmax <= self.vcenter:
+            self.vmax = self.vcenter + (self.vcenter - self.vmin)
 
     def __call__(self, value, clip=None):
         """
-        Map value to the interval [0, 1]. The clip argument is unused.
+        Map value to the interval [0, 1]. The *clip* argument is unused.
         """
         result, is_scalar = self.process_value(value)
         self.autoscale_None(result)  # sets self.vmin, self.vmax if None
@@ -1396,6 +2742,19 @@ class CenteredNorm(Normalize):
             *vcenter* + *halfrange* is ``1.0`` in the normalization.
             Defaults to the largest absolute difference to *vcenter* for
             the values in the dataset.
+        clip : bool, default: False
+            Determines the behavior for mapping values outside the range
+            ``[vmin, vmax]``.
+
+            If clipping is off, values outside the range ``[vmin, vmax]`` are
+            also transformed, resulting in values outside ``[0, 1]``.  This
+            behavior is usually desirable, as colormaps can mark these *under*
+            and *over* values with specific colors.
+
+            If clipping is on, values below *vmin* are mapped to 0 and values
+            above *vmax* are mapped to 1. Such values become indistinguishable
+            from regular boundary values, which may cause misinterpretation of
+            the data.
 
         Examples
         --------
@@ -1413,27 +2772,43 @@ class CenteredNorm(Normalize):
         # calling the halfrange setter to set vmin and vmax
         self.halfrange = halfrange
 
-    def _set_vmin_vmax(self):
-        """
-        Set *vmin* and *vmax* based on *vcenter* and *halfrange*.
-        """
-        self.vmax = self._vcenter + self._halfrange
-        self.vmin = self._vcenter - self._halfrange
-
     def autoscale(self, A):
         """
         Set *halfrange* to ``max(abs(A-vcenter))``, then set *vmin* and *vmax*.
         """
         A = np.asanyarray(A)
-        self._halfrange = max(self._vcenter-A.min(),
-                              A.max()-self._vcenter)
-        self._set_vmin_vmax()
+        self.halfrange = max(self._vcenter-A.min(),
+                             A.max()-self._vcenter)
 
     def autoscale_None(self, A):
         """Set *vmin* and *vmax*."""
         A = np.asanyarray(A)
-        if self._halfrange is None and A.size:
+        if self.halfrange is None and A.size:
             self.autoscale(A)
+
+    @property
+    def vmin(self):
+        return self._vmin
+
+    @vmin.setter
+    def vmin(self, value):
+        value = _sanitize_extrema(value)
+        if value != self._vmin:
+            self._vmin = value
+            self._vmax = 2*self.vcenter - value
+            self._changed()
+
+    @property
+    def vmax(self):
+        return self._vmax
+
+    @vmax.setter
+    def vmax(self, value):
+        value = _sanitize_extrema(value)
+        if value != self._vmax:
+            self._vmax = value
+            self._vmin = 2*self.vcenter - value
+            self._changed()
 
     @property
     def vcenter(self):
@@ -1443,32 +2818,24 @@ class CenteredNorm(Normalize):
     def vcenter(self, vcenter):
         if vcenter != self._vcenter:
             self._vcenter = vcenter
+            # Trigger an update of the vmin/vmax values through the setter
+            self.halfrange = self.halfrange
             self._changed()
-        if self.vmax is not None:
-            # recompute halfrange assuming vmin and vmax represent
-            # min and max of data
-            self._halfrange = max(self._vcenter-self.vmin,
-                                  self.vmax-self._vcenter)
-            self._set_vmin_vmax()
 
     @property
     def halfrange(self):
-        return self._halfrange
+        if self.vmin is None or self.vmax is None:
+            return None
+        return (self.vmax - self.vmin) / 2
 
     @halfrange.setter
     def halfrange(self, halfrange):
         if halfrange is None:
-            self._halfrange = None
             self.vmin = None
             self.vmax = None
         else:
-            self._halfrange = abs(halfrange)
-
-    def __call__(self, value, clip=None):
-        if self._halfrange is not None:
-            # enforce symmetry, reset vmin and vmax
-            self._set_vmin_vmax()
-        return super().__call__(value, clip=clip)
+            self.vmin = self.vcenter - abs(halfrange)
+            self.vmax = self.vcenter + abs(halfrange)
 
 
 def make_norm_from_scale(scale_cls, base_norm_cls=None, *, init=None):
@@ -1505,35 +2872,67 @@ def make_norm_from_scale(scale_cls, base_norm_cls=None, *, init=None):
     if base_norm_cls is None:
         return functools.partial(make_norm_from_scale, scale_cls, init=init)
 
+    if isinstance(scale_cls, functools.partial):
+        scale_args = scale_cls.args
+        scale_kwargs_items = tuple(scale_cls.keywords.items())
+        scale_cls = scale_cls.func
+    else:
+        scale_args = scale_kwargs_items = ()
+
     if init is None:
         def init(vmin=None, vmax=None, clip=False): pass
 
     return _make_norm_from_scale(
-        scale_cls, base_norm_cls, inspect.signature(init))
+        scale_cls, scale_args, scale_kwargs_items,
+        base_norm_cls, inspect.signature(init))
 
 
-@functools.lru_cache(None)
-def _make_norm_from_scale(scale_cls, base_norm_cls, bound_init_signature):
+@functools.cache
+def _make_norm_from_scale(
+    scale_cls, scale_args, scale_kwargs_items,
+    base_norm_cls, bound_init_signature,
+):
     """
     Helper for `make_norm_from_scale`.
 
-    This function is split out so that it takes a signature object as third
-    argument (as signatures are picklable, contrary to arbitrary lambdas);
-    caching is also used so that different unpickles reuse the same class.
+    This function is split out to enable caching (in particular so that
+    different unpickles reuse the same class).  In order to do so,
+
+    - ``functools.partial`` *scale_cls* is expanded into ``func, args, kwargs``
+      to allow memoizing returned norms (partial instances always compare
+      unequal, but we can check identity based on ``func, args, kwargs``;
+    - *init* is replaced by *init_signature*, as signatures are picklable,
+      unlike to arbitrary lambdas.
     """
 
-    class Norm(base_norm_cls):
+    class ScaleNorm(base_norm_cls):
         def __reduce__(self):
+            cls = type(self)
+            # If the class is toplevel-accessible, it is possible to directly
+            # pickle it "by name".  This is required to support norm classes
+            # defined at a module's toplevel, as the inner base_norm_cls is
+            # otherwise unpicklable (as it gets shadowed by the generated norm
+            # class).  If either import or attribute access fails, fall back to
+            # the general path.
+            try:
+                if cls is getattr(importlib.import_module(cls.__module__),
+                                  cls.__qualname__):
+                    return (_create_empty_object_of_class, (cls,), vars(self))
+            except (ImportError, AttributeError):
+                pass
             return (_picklable_norm_constructor,
-                    (scale_cls, base_norm_cls, bound_init_signature),
-                    self.__dict__)
+                    (scale_cls, scale_args, scale_kwargs_items,
+                     base_norm_cls, bound_init_signature),
+                    vars(self))
 
         def __init__(self, *args, **kwargs):
             ba = bound_init_signature.bind(*args, **kwargs)
             ba.apply_defaults()
             super().__init__(
                 **{k: ba.arguments.pop(k) for k in ["vmin", "vmax", "clip"]})
-            self._scale = scale_cls(axis=None, **ba.arguments)
+            self._scale = functools.partial(
+                scale_cls, *scale_args, **dict(scale_kwargs_items))(
+                    axis=None, **ba.arguments)
             self._trf = self._scale.get_transform()
 
         __init__.__signature__ = bound_init_signature.replace(parameters=[
@@ -1578,30 +2977,31 @@ def _make_norm_from_scale(scale_cls, base_norm_cls, bound_init_signature):
                      .reshape(np.shape(value)))
             return value[0] if is_scalar else value
 
-        def autoscale(self, A):
+        def autoscale_None(self, A):
             # i.e. A[np.isfinite(...)], but also for non-array A's
             in_trf_domain = np.extract(np.isfinite(self._trf.transform(A)), A)
-            return super().autoscale(in_trf_domain)
-
-        def autoscale_None(self, A):
-            in_trf_domain = np.extract(np.isfinite(self._trf.transform(A)), A)
+            if in_trf_domain.size == 0:
+                in_trf_domain = np.ma.masked
             return super().autoscale_None(in_trf_domain)
 
-    Norm.__name__ = (
-            f"{scale_cls.__name__}Norm" if base_norm_cls is Normalize
-            else base_norm_cls.__name__)
-    Norm.__qualname__ = (
-            f"{scale_cls.__qualname__}Norm" if base_norm_cls is Normalize
-            else base_norm_cls.__qualname__)
-    Norm.__module__ = base_norm_cls.__module__
-    Norm.__doc__ = base_norm_cls.__doc__
+    if base_norm_cls is Normalize:
+        ScaleNorm.__name__ = f"{scale_cls.__name__}Norm"
+        ScaleNorm.__qualname__ = f"{scale_cls.__qualname__}Norm"
+    else:
+        ScaleNorm.__name__ = base_norm_cls.__name__
+        ScaleNorm.__qualname__ = base_norm_cls.__qualname__
+    ScaleNorm.__module__ = base_norm_cls.__module__
+    ScaleNorm.__doc__ = base_norm_cls.__doc__
 
-    return Norm
+    return ScaleNorm
+
+
+def _create_empty_object_of_class(cls):
+    return cls.__new__(cls)
 
 
 def _picklable_norm_constructor(*args):
-    cls = _make_norm_from_scale(*args)
-    return cls.__new__(cls)
+    return _create_empty_object_of_class(_make_norm_from_scale(*args))
 
 
 @make_norm_from_scale(
@@ -1627,19 +3027,24 @@ class FuncNorm(Normalize):
         processed; i.e., ``__call__(A)`` calls ``autoscale_None(A)``.
 
     clip : bool, default: False
-        If ``True`` values falling outside the range ``[vmin, vmax]``,
-        are mapped to 0 or 1, whichever is closer, and masked values are
-        set to 1.  If ``False`` masked values remain masked.
+        Determines the behavior for mapping values outside the range
+        ``[vmin, vmax]``.
 
-        Clipping silently defeats the purpose of setting the over, under,
-        and masked colors in a colormap, so it is likely to lead to
-        surprises; therefore the default is ``clip=False``.
+        If clipping is off, values outside the range ``[vmin, vmax]`` are also
+        transformed by the function, resulting in values outside ``[0, 1]``.
+        This behavior is usually desirable, as colormaps can mark these *under*
+        and *over* values with specific colors.
+
+        If clipping is on, values below *vmin* are mapped to 0 and values above
+        *vmax* are mapped to 1. Such values become indistinguishable from
+        regular boundary values, which may cause misinterpretation of the data.
     """
 
 
-@make_norm_from_scale(functools.partial(scale.LogScale, nonpositive="mask"))
-class LogNorm(Normalize):
-    """Normalize a given value to the 0-1 range on a log scale."""
+LogNorm = make_norm_from_scale(
+    functools.partial(scale.LogScale, nonpositive="mask"))(Normalize)
+LogNorm.__name__ = LogNorm.__qualname__ = "LogNorm"
+LogNorm.__doc__ = "Normalize a given value to the 0-1 range on a log scale."
 
 
 @make_norm_from_scale(
@@ -1680,10 +3085,73 @@ class SymLogNorm(Normalize):
         self._scale.linthresh = value
 
 
-class PowerNorm(Normalize):
+@make_norm_from_scale(
+    scale.AsinhScale,
+    init=lambda linear_width=1, vmin=None, vmax=None, clip=False: None)
+class AsinhNorm(Normalize):
     """
+    The inverse hyperbolic sine scale is approximately linear near
+    the origin, but becomes logarithmic for larger positive
+    or negative values. Unlike the `SymLogNorm`, the transition between
+    these linear and logarithmic regions is smooth, which may reduce
+    the risk of visual artifacts.
+
+    .. note::
+
+       This API is provisional and may be revised in the future
+       based on early user feedback.
+
+    Parameters
+    ----------
+    linear_width : float, default: 1
+        The effective width of the linear region, beyond which
+        the transformation becomes asymptotically logarithmic
+    """
+
+    @property
+    def linear_width(self):
+        return self._scale.linear_width
+
+    @linear_width.setter
+    def linear_width(self, value):
+        self._scale.linear_width = value
+
+
+class PowerNorm(Normalize):
+    r"""
     Linearly map a given value to the 0-1 range and then apply
     a power-law normalization over that range.
+
+    Parameters
+    ----------
+    gamma : float
+        Power law exponent.
+    vmin, vmax : float or None
+        If *vmin* and/or *vmax* is not given, they are initialized from the
+        minimum and maximum value, respectively, of the first input
+        processed; i.e., ``__call__(A)`` calls ``autoscale_None(A)``.
+    clip : bool, default: False
+        Determines the behavior for mapping values outside the range
+        ``[vmin, vmax]``.
+
+        If clipping is off, values above *vmax* are transformed by the power
+        function, resulting in values above 1, and values below *vmin* are linearly
+        transformed resulting in values below 0. This behavior is usually desirable, as
+        colormaps can mark these *under* and *over* values with specific colors.
+
+        If clipping is on, values below *vmin* are mapped to 0 and values above
+        *vmax* are mapped to 1. Such values become indistinguishable from
+        regular boundary values, which may cause misinterpretation of the data.
+
+    Notes
+    -----
+    The normalization formula is
+
+    .. math::
+
+        \left ( \frac{x - v_{min}}{v_{max}  - v_{min}} \right )^{\gamma}
+
+    For input values below *vmin*, gamma is set to one.
     """
     def __init__(self, gamma, vmin=None, vmax=None, clip=False):
         super().__init__(vmin, vmax, clip)
@@ -1709,9 +3177,8 @@ class PowerNorm(Normalize):
                                      mask=mask)
             resdat = result.data
             resdat -= vmin
-            resdat[resdat < 0] = 0
-            np.power(resdat, gamma, resdat)
-            resdat /= (vmax - vmin) ** gamma
+            resdat /= (vmax - vmin)
+            resdat[resdat > 0] = np.power(resdat[resdat > 0], gamma)
 
             result = np.ma.array(resdat, mask=result.mask, copy=False)
         if is_scalar:
@@ -1721,14 +3188,21 @@ class PowerNorm(Normalize):
     def inverse(self, value):
         if not self.scaled():
             raise ValueError("Not invertible until scaled")
+
+        result, is_scalar = self.process_value(value)
+
         gamma = self.gamma
         vmin, vmax = self.vmin, self.vmax
 
-        if np.iterable(value):
-            val = np.ma.asarray(value)
-            return np.ma.power(val, 1. / gamma) * (vmax - vmin) + vmin
-        else:
-            return pow(value, 1. / gamma) * (vmax - vmin) + vmin
+        resdat = result.data
+        resdat[resdat > 0] = np.power(resdat[resdat > 0], 1 / gamma)
+        resdat *= (vmax - vmin)
+        resdat += vmin
+
+        result = np.ma.array(resdat, mask=result.mask, copy=False)
+        if is_scalar:
+            result = result[0]
+        return result
 
 
 class BoundaryNorm(Normalize):
@@ -1750,6 +3224,8 @@ class BoundaryNorm(Normalize):
         boundaries : array-like
             Monotonically increasing sequence of at least 2 bin edges:  data
             falling in the n-th bin will be mapped to the n-th color.
+            Bins are left-closed and right-open; i.e., the n-th bin is
+            ``boundaries[n] <= value < boundaries[n + 1]``.
 
         ncolors : int
             Number of colors in the colormap to be used.
@@ -1757,12 +3233,12 @@ class BoundaryNorm(Normalize):
         clip : bool, optional
             If clip is ``True``, out of range values are mapped to 0 if they
             are below ``boundaries[0]`` or mapped to ``ncolors - 1`` if they
-            are above ``boundaries[-1]``.
+            are greater than or equal to ``boundaries[-1]``.
 
             If clip is ``False``, out of range values are mapped to -1 if
             they are below ``boundaries[0]`` or mapped to *ncolors* if they are
-            above ``boundaries[-1]``. These are then converted to valid indices
-            by `Colormap.__call__`.
+            greater than or equal to ``boundaries[-1]``. These are then
+            converted to valid indices by `Colormap.__call__`.
 
         extend : {'neither', 'both', 'min', 'max'}, default: 'neither'
             Extend the number of bins to include one or both of the
@@ -1865,16 +3341,313 @@ class NoNorm(Normalize):
     indices directly in a `~matplotlib.cm.ScalarMappable`.
     """
     def __call__(self, value, clip=None):
+        if np.iterable(value):
+            return np.ma.array(value)
         return value
 
     def inverse(self, value):
+        if np.iterable(value):
+            return np.ma.array(value)
         return value
+
+
+class MultiNorm(Norm):
+    """
+    A class which contains multiple scalar norms.
+    """
+
+    def __init__(self, norms, vmin=None, vmax=None, clip=None):
+        """
+        Parameters
+        ----------
+        norms : list of (str or `Normalize`)
+            The constituent norms. The list must have a minimum length of 1.
+        vmin, vmax : None or list of (float or None)
+            Limits of the constituent norms.
+            If a list, one value is assigned to each of the constituent
+            norms.
+            If None, the limits of the constituent norms
+            are not changed.
+        clip : None or list of bools, default: None
+            Determines the behavior for mapping values outside the range
+            ``[vmin, vmax]`` for the constituent norms.
+            If a list, each value is assigned to each of the constituent
+            norms.
+            If None, the behaviour of the constituent norms is not changed.
+        """
+        if cbook.is_scalar_or_string(norms):
+            raise ValueError(
+                    "MultiNorm must be assigned an iterable of norms, where each "
+                    f"norm is of type `str`, or `Normalize`, not {type(norms)}")
+
+        if len(norms) < 1:
+            raise ValueError("MultiNorm must be assigned at least one norm")
+
+        def resolve(norm):
+            if isinstance(norm, str):
+                scale_cls = _api.getitem_checked(scale._scale_mapping, norm=norm)
+                return mpl.colorizer._auto_norm_from_scale(scale_cls)()
+            elif isinstance(norm, Normalize):
+                return norm
+            else:
+                raise ValueError(
+                    "Each norm assigned to MultiNorm must be "
+                    f"of type `str`, or `Normalize`, not {type(norm)}")
+
+        self._norms = tuple(resolve(norm) for norm in norms)
+
+        self.callbacks = cbook.CallbackRegistry(signals=["changed"])
+
+        self.vmin = vmin
+        self.vmax = vmax
+        self.clip = clip
+
+        for n in self._norms:
+            n.callbacks.connect('changed', self._changed)
+
+    @property
+    def n_components(self):
+        """Number of norms held by this `MultiNorm`."""
+        return len(self._norms)
+
+    @property
+    def norms(self):
+        """The individual norms held by this `MultiNorm`."""
+        return self._norms
+
+    @property
+    def vmin(self):
+        """The lower limit of each constituent norm."""
+        return tuple(n.vmin for n in self._norms)
+
+    @vmin.setter
+    def vmin(self, values):
+        if values is None:
+            return
+        if not np.iterable(values) or len(values) != self.n_components:
+            raise ValueError("*vmin* must have one component for each norm. "
+                             f"Expected an iterable of length {self.n_components}, "
+                             f"but got {values!r}")
+        with self.callbacks.blocked():
+            for norm, v in zip(self.norms, values):
+                norm.vmin = v
+        self._changed()
+
+    @property
+    def vmax(self):
+        """The upper limit of each constituent norm."""
+        return tuple(n.vmax for n in self._norms)
+
+    @vmax.setter
+    def vmax(self, values):
+        if values is None:
+            return
+        if not np.iterable(values) or len(values) != self.n_components:
+            raise ValueError("*vmax* must have one component for each norm. "
+                             f"Expected an iterable of length {self.n_components}, "
+                             f"but got {values!r}")
+        with self.callbacks.blocked():
+            for norm, v in zip(self.norms, values):
+                norm.vmax = v
+        self._changed()
+
+    @property
+    def clip(self):
+        """The clip behaviour of each constituent norm."""
+        return tuple(n.clip for n in self._norms)
+
+    @clip.setter
+    def clip(self, values):
+        if values is None:
+            return
+        if not np.iterable(values) or len(values) != self.n_components:
+            raise ValueError("*clip* must have one component for each norm. "
+                             f"Expected an iterable of length {self.n_components}, "
+                             f"but got {values!r}")
+        with self.callbacks.blocked():
+            for norm, v in zip(self.norms, values):
+                norm.clip = v
+        self._changed()
+
+    def _changed(self):
+        """
+        Call this whenever the norm is changed to notify all the
+        callback listeners to the 'changed' signal.
+        """
+        self.callbacks.process('changed')
+
+    def __call__(self, values, clip=None):
+        """
+        Normalize the data and return the normalized data.
+
+        Each component of the input is normalized via the constituent norm.
+
+        Parameters
+        ----------
+        values : array-like
+            The input data, as an iterable or a structured numpy array.
+
+            - If iterable, must be of length `n_components`. Each element can be a
+              scalar or array-like and is normalized through the corresponding norm.
+            - If structured array, must have `n_components` fields. Each field
+              is normalized through the corresponding norm.
+
+        clip : list of bools or None, optional
+            Determines the behavior for mapping values outside the range
+            ``[vmin, vmax]``. See the description of the parameter *clip* in
+            `.Normalize`.
+            If ``None``, defaults to ``self.clip`` (which defaults to
+            ``False``).
+
+        Returns
+        -------
+        tuple
+            Normalized input values
+
+        Notes
+        -----
+        If not already initialized, ``self.vmin`` and ``self.vmax`` are
+        initialized using ``self.autoscale_None(values)``.
+        """
+        if clip is None:
+            clip = self.clip
+        if not np.iterable(clip) or len(clip) != self.n_components:
+            raise ValueError("*clip* must have one component for each norm. "
+                             f"Expected an iterable of length {self.n_components}, "
+                             f"but got {clip!r}")
+
+        values = self._iterable_components_in_data(values, self.n_components)
+        result = tuple(n(v, clip=c) for n, v, c in zip(self.norms, values, clip))
+        return result
+
+    def inverse(self, values):
+        """
+        Map the normalized values (i.e., index in the colormap) back to data values.
+
+        Parameters
+        ----------
+        values : array-like
+            The input data, as an iterable or a structured numpy array.
+
+            - If iterable, must be of length `n_components`. Each element can be a
+              scalar or array-like and is mapped through the corresponding norm.
+            - If structured array, must have `n_components` fields. Each field
+              is mapped through the corresponding norm.
+
+        """
+        values = self._iterable_components_in_data(values, self.n_components)
+        result = tuple(n.inverse(v) for n, v in zip(self.norms, values))
+        return result
+
+    def autoscale(self, A):
+        """
+        For each constituent norm, set *vmin*, *vmax* to min, max of the corresponding
+        component in *A*.
+
+        Parameters
+        ----------
+        A : array-like
+            The input data, as an iterable or a structured numpy array.
+
+            - If iterable, must be of length `n_components`. Each element
+              is used for the limits of one constituent norm.
+            - If structured array, must have `n_components` fields. Each field
+              is used for the limits of one constituent norm.
+        """
+        with self.callbacks.blocked():
+            A = self._iterable_components_in_data(A, self.n_components)
+            for n, a in zip(self.norms, A):
+                n.autoscale(a)
+        self._changed()
+
+    def autoscale_None(self, A):
+        """
+        If *vmin* or *vmax* are not set on any constituent norm,
+        use the min/max of the corresponding component in *A* to set them.
+
+        Parameters
+        ----------
+        A : array-like
+            The input data, as an iterable or a structured numpy array.
+
+            - If iterable, must be of length `n_components`. Each element
+              is used for the limits of one constituent norm.
+            - If structured array, must have `n_components` fields. Each field
+              is used for the limits of one constituent norm.
+        """
+        with self.callbacks.blocked():
+            A = self._iterable_components_in_data(A, self.n_components)
+            for n, a in zip(self.norms, A):
+                n.autoscale_None(a)
+        self._changed()
+
+    def scaled(self):
+        """Return whether both *vmin* and *vmax* are set on all constituent norms."""
+        return all(n.scaled() for n in self.norms)
+
+    @staticmethod
+    def _iterable_components_in_data(data, n_components):
+        """
+        Provides an iterable over the components contained in the data.
+
+        An input array with `n_components` fields is returned as a tuple of length n
+        referencing slices of the original array.
+
+        Parameters
+        ----------
+        data : array-like
+            The input data, as an iterable or a structured numpy array.
+
+            - If iterable, must be of length `n_components`
+            - If structured array, must have `n_components` fields.
+
+        Returns
+        -------
+        tuple of np.ndarray
+
+        """
+        if isinstance(data, np.ndarray) and data.dtype.fields is not None:
+            # structured array
+            if len(data.dtype.fields) != n_components:
+                raise ValueError(
+                    "Structured array inputs to MultiNorm must have the same "
+                    "number of fields as components in the MultiNorm. Expected "
+                    f"{n_components}, but got {len(data.dtype.fields)} fields"
+                    )
+            else:
+                return tuple(data[field] for field in data.dtype.names)
+        try:
+            n_elements = len(data)
+        except TypeError:
+            raise ValueError("MultiNorm expects a sequence with one element per "
+                             f"component as input, but got {data!r} instead")
+        if n_elements != n_components:
+            if isinstance(data, np.ndarray) and data.shape[-1] == n_components:
+                if len(data.shape) == 2:
+                    raise ValueError(
+                        f"MultiNorm expects a sequence with one element per component. "
+                        "You can use `data_transposed = data.T` "
+                        "to convert the input data of shape "
+                        f"{data.shape} to a compatible shape {data.shape[::-1]}")
+                else:
+                    raise ValueError(
+                        f"MultiNorm expects a sequence with one element per component. "
+                        "You can use `data_as_list = [data[..., i] for i in "
+                        "range(data.shape[-1])]` to convert the input data of shape "
+                        f" {data.shape} to a compatible list")
+
+            raise ValueError(
+                "MultiNorm expects a sequence with one element per component. "
+                f"This MultiNorm has {n_components} components, but got a sequence "
+                f"with {n_elements} elements"
+                )
+
+        return tuple(data[i] for i in range(n_elements))
 
 
 def rgb_to_hsv(arr):
     """
-    Convert float rgb values (in the range [0, 1]), in a numpy array to hsv
-    values.
+    Convert an array of float RGB values (in the range [0, 1]) to HSV values.
 
     Parameters
     ----------
@@ -1883,26 +3656,39 @@ def rgb_to_hsv(arr):
 
     Returns
     -------
-    (..., 3) ndarray
-       Colors converted to hsv values in range [0, 1]
+    (..., 3) `~numpy.ndarray`
+       Colors converted to HSV values in range [0, 1]
     """
     arr = np.asarray(arr)
 
     # check length of the last dimension, should be _some_ sort of rgb
     if arr.shape[-1] != 3:
         raise ValueError("Last dimension of input array must be 3; "
-                         "shape {} was found.".format(arr.shape))
+                         f"shape {arr.shape} was found.")
 
     in_shape = arr.shape
-    arr = np.array(
-        arr, copy=False,
-        dtype=np.promote_types(arr.dtype, np.float32),  # Don't work on ints.
-        ndmin=2,  # In case input was 1D.
-    )
+    # ensure numerics are done at least on float32; ints are cast as well
+    arr = np.asarray(arr, dtype=np.promote_types(arr.dtype, np.float32))
+    if arr.ndim == 1:
+        arr = np.expand_dims(arr, axis=0)  # ensure arr is 2D
+
     out = np.zeros_like(arr)
     arr_max = arr.max(-1)
+    # Check if input is in the expected range
+    if np.any(arr_max > 1):
+        raise ValueError(
+            "Input array must be in the range [0, 1]. "
+            f"Found a maximum value of {arr_max.max()}"
+        )
+
+    if arr.min() < 0:
+        raise ValueError(
+            "Input array must be in the range [0, 1]. "
+            f"Found a minimum value of {arr.min()}"
+        )
+
     ipos = arr_max > 0
-    delta = arr.ptp(-1)
+    delta = np.ptp(arr, -1)
     s = np.zeros_like(delta)
     s[ipos] = delta[ipos] / arr_max[ipos]
     ipos = delta > 0
@@ -1925,7 +3711,7 @@ def rgb_to_hsv(arr):
 
 def hsv_to_rgb(hsv):
     """
-    Convert hsv values to rgb.
+    Convert HSV values to RGB.
 
     Parameters
     ----------
@@ -1934,7 +3720,7 @@ def hsv_to_rgb(hsv):
 
     Returns
     -------
-    (..., 3) ndarray
+    (..., 3) `~numpy.ndarray`
        Colors converted to RGB values in range [0, 1]
     """
     hsv = np.asarray(hsv)
@@ -1942,14 +3728,13 @@ def hsv_to_rgb(hsv):
     # check length of the last dimension, should be _some_ sort of rgb
     if hsv.shape[-1] != 3:
         raise ValueError("Last dimension of input array must be 3; "
-                         "shape {shp} was found.".format(shp=hsv.shape))
+                         f"shape {hsv.shape} was found.")
 
     in_shape = hsv.shape
-    hsv = np.array(
-        hsv, copy=False,
-        dtype=np.promote_types(hsv.dtype, np.float32),  # Don't work on ints.
-        ndmin=2,  # In case input was 1D.
-    )
+    # ensure numerics are done at least on float32; ints are cast as well
+    hsv = np.asarray(hsv, dtype=np.promote_types(hsv.dtype, np.float32))
+    if hsv.ndim == 1:
+        hsv = np.expand_dims(hsv, axis=0)  # ensure hsv is 2D
 
     h = hsv[..., 0]
     s = hsv[..., 1]
@@ -2021,8 +3806,8 @@ class LightSource:
     Angles are in degrees, with the azimuth measured
     clockwise from north and elevation up from the zero plane of the surface.
 
-    `shade` is used to produce "shaded" rgb values for a data array.
-    `shade_rgb` can be used to combine an rgb image with an elevation map.
+    `shade` is used to produce "shaded" RGB values for a data array.
+    `shade_rgb` can be used to combine an RGB image with an elevation map.
     `hillshade` produces an illumination map of a surface.
     """
 
@@ -2041,6 +3826,18 @@ class LightSource:
         altdeg : float, default: 45 degrees
             The altitude (0-90, degrees up from horizontal) of the light
             source.
+        hsv_min_val : number, default: 0
+            The minimum value ("v" in "hsv") that the *intensity* map can shift the
+            output image to.
+        hsv_max_val : number, default: 1
+            The maximum value ("v" in "hsv") that the *intensity* map can shift the
+            output image to.
+        hsv_min_sat : number, default: 1
+            The minimum saturation value that the *intensity* map can shift the output
+            image to.
+        hsv_max_sat : number, default: 0
+            The maximum saturation value that the *intensity* map can shift the output
+            image to.
 
         Notes
         -----
@@ -2101,7 +3898,7 @@ class LightSource:
 
         Returns
         -------
-        ndarray
+        `~numpy.ndarray`
             A 2D array of illumination values between 0-1, where 0 is
             completely in shadow and 1 is completely illuminated.
         """
@@ -2144,7 +3941,7 @@ class LightSource:
 
         Returns
         -------
-        ndarray
+        `~numpy.ndarray`
             A 2D array of illumination values between 0-1, where 0 is
             completely in shadow and 1 is completely illuminated.
         """
@@ -2193,8 +3990,8 @@ class LightSource:
             "overlay".  Note that for most topographic surfaces,
             "overlay" or "soft" appear more visually realistic. If a
             user-defined function is supplied, it is expected to
-            combine an MxNx3 RGB array of floats (ranging 0 to 1) with
-            an MxNx1 hillshade array (also 0 to 1).  (Call signature
+            combine an (M, N, 3) RGB array of floats (ranging 0 to 1) with
+            an (M, N, 1) hillshade array (also 0 to 1).  (Call signature
             ``func(rgb, illum, **kwargs)``) Additional kwargs supplied
             to this function will be passed on to the *blend_mode*
             function.
@@ -2222,12 +4019,13 @@ class LightSource:
             full illumination or shadow (and clipping any values that move
             beyond 0 or 1). Note that this is not visually or mathematically
             the same as vertical exaggeration.
-        Additional kwargs are passed on to the *blend_mode* function.
+        **kwargs
+            Additional kwargs are passed on to the *blend_mode* function.
 
         Returns
         -------
-        ndarray
-            An MxNx4 array of floats ranging between 0-1.
+        `~numpy.ndarray`
+            An (M, N, 4) array of floats ranging between 0-1.
         """
         if vmin is None:
             vmin = data.min()
@@ -2268,8 +4066,8 @@ class LightSource:
             defaults to "hsv". Note that for most topographic surfaces,
             "overlay" or "soft" appear more visually realistic. If a
             user-defined function is supplied, it is expected to combine an
-            MxNx3 RGB array of floats (ranging 0 to 1) with an MxNx1 hillshade
-            array (also 0 to 1).  (Call signature
+            (M, N, 3) RGB array of floats (ranging 0 to 1) with an (M, N, 1)
+            hillshade array (also 0 to 1).  (Call signature
             ``func(rgb, illum, **kwargs)``)
             Additional kwargs supplied to this function will be passed on to
             the *blend_mode* function.
@@ -2283,11 +4081,12 @@ class LightSource:
             The x-spacing (columns) of the input *elevation* grid.
         dy : number, optional
             The y-spacing (rows) of the input *elevation* grid.
-        Additional kwargs are passed on to the *blend_mode* function.
+        **kwargs
+            Additional kwargs are passed on to the *blend_mode* function.
 
         Returns
         -------
-        ndarray
+        `~numpy.ndarray`
             An (m, n, 3) array of floats ranging between 0-1.
         """
         # Calculate the "hillshade" intensity.
@@ -2306,8 +4105,8 @@ class LightSource:
             try:
                 blend = blend_mode(rgb, intensity, **kwargs)
             except TypeError as err:
-                raise ValueError('"blend_mode" must be callable or one of {}'
-                                 .format(lookup.keys)) from err
+                raise ValueError('"blend_mode" must be callable or one of '
+                                 f'{lookup.keys}') from err
 
         # Only apply result where hillshade intensity isn't masked
         if np.ma.is_masked(intensity):
@@ -2326,7 +4125,7 @@ class LightSource:
         which can then be used to plot the shaded image with imshow.
 
         The color of the resulting image will be darkened by moving the (s, v)
-        values (in hsv colorspace) toward (hsv_min_sat, hsv_min_val) in the
+        values (in HSV colorspace) toward (hsv_min_sat, hsv_min_val) in the
         shaded regions, or lightened by sliding (s, v) toward (hsv_max_sat,
         hsv_max_val) in regions that are illuminated.  The default extremes are
         chose so that completely shaded points are nearly black (s = 1, v = 0)
@@ -2334,27 +4133,29 @@ class LightSource:
 
         Parameters
         ----------
-        rgb : ndarray
-            An MxNx3 RGB array of floats ranging from 0 to 1 (color image).
-        intensity : ndarray
-            An MxNx1 array of floats ranging from 0 to 1 (grayscale image).
-        hsv_max_sat : number, default: 1
-            The maximum saturation value that the *intensity* map can shift the
-            output image to.
+        rgb : `~numpy.ndarray`
+            An (M, N, 3) RGB array of floats ranging from 0 to 1 (color image).
+        intensity : `~numpy.ndarray`
+            An (M, N, 1) array of floats ranging from 0 to 1 (grayscale image).
+        hsv_max_sat : number, optional
+            The maximum saturation value that the *intensity* map can shift the output
+            image to. If not provided, use the value provided upon initialization.
         hsv_min_sat : number, optional
-            The minimum saturation value that the *intensity* map can shift the
-            output image to. Defaults to 0.
+            The minimum saturation value that the *intensity* map can shift the output
+            image to. If not provided, use the value provided upon initialization.
         hsv_max_val : number, optional
-            The maximum value ("v" in "hsv") that the *intensity* map can shift
-            the output image to. Defaults to 1.
+            The maximum value ("v" in "hsv") that the *intensity* map can shift the
+            output image to. If not provided, use the value provided upon
+            initialization.
         hsv_min_val : number, optional
-            The minimum value ("v" in "hsv") that the *intensity* map can shift
-            the output image to. Defaults to 0.
+            The minimum value ("v" in "hsv") that the *intensity* map can shift the
+            output image to. If not provided, use the value provided upon
+            initialization.
 
         Returns
         -------
-        ndarray
-            An MxNx3 RGB array representing the combined images.
+        `~numpy.ndarray`
+            An (M, N, 3) RGB array representing the combined images.
         """
         # Backward compatibility...
         if hsv_max_sat is None:
@@ -2391,38 +4192,38 @@ class LightSource:
 
     def blend_soft_light(self, rgb, intensity):
         """
-        Combine an rgb image with an intensity map using "soft light" blending,
+        Combine an RGB image with an intensity map using "soft light" blending,
         using the "pegtop" formula.
 
         Parameters
         ----------
-        rgb : ndarray
-            An MxNx3 RGB array of floats ranging from 0 to 1 (color image).
-        intensity : ndarray
-            An MxNx1 array of floats ranging from 0 to 1 (grayscale image).
+        rgb : `~numpy.ndarray`
+            An (M, N, 3) RGB array of floats ranging from 0 to 1 (color image).
+        intensity : `~numpy.ndarray`
+            An (M, N, 1) array of floats ranging from 0 to 1 (grayscale image).
 
         Returns
         -------
-        ndarray
-            An MxNx3 RGB array representing the combined images.
+        `~numpy.ndarray`
+            An (M, N, 3) RGB array representing the combined images.
         """
         return 2 * intensity * rgb + (1 - 2 * intensity) * rgb**2
 
     def blend_overlay(self, rgb, intensity):
         """
-        Combine an rgb image with an intensity map using "overlay" blending.
+        Combine an RGB image with an intensity map using "overlay" blending.
 
         Parameters
         ----------
-        rgb : ndarray
-            An MxNx3 RGB array of floats ranging from 0 to 1 (color image).
-        intensity : ndarray
-            An MxNx1 array of floats ranging from 0 to 1 (grayscale image).
+        rgb : `~numpy.ndarray`
+            An (M, N, 3) RGB array of floats ranging from 0 to 1 (color image).
+        intensity : `~numpy.ndarray`
+            An (M, N, 1) array of floats ranging from 0 to 1 (grayscale image).
 
         Returns
         -------
         ndarray
-            An MxNx3 RGB array representing the combined images.
+            An (M, N, 3) RGB array representing the combined images.
         """
         low = 2 * intensity * rgb
         high = 1 - 2 * (1 - intensity) * (1 - rgb)
@@ -2449,8 +4250,8 @@ def from_levels_and_colors(levels, colors, extend='neither'):
 
     Returns
     -------
-    cmap : `~matplotlib.colors.Normalize`
-    norm : `~matplotlib.colors.Colormap`
+    cmap : `~matplotlib.colors.Colormap`
+    norm : `~matplotlib.colors.Normalize`
     """
     slice_map = {
         'both': slice(1, -1),
@@ -2462,23 +4263,18 @@ def from_levels_and_colors(levels, colors, extend='neither'):
     color_slice = slice_map[extend]
 
     n_data_colors = len(levels) - 1
-    n_expected = n_data_colors + color_slice.start - (color_slice.stop or 0)
+    n_extend_colors = color_slice.start - (color_slice.stop or 0)  # 0, 1 or 2
+    n_expected = n_data_colors + n_extend_colors
     if len(colors) != n_expected:
         raise ValueError(
-            f'With extend == {extend!r} and {len(levels)} levels, '
-            f'expected {n_expected} colors, but got {len(colors)}')
+            f'Expected {n_expected} colors ({n_data_colors} colors for {len(levels)} '
+            f'levels, and {n_extend_colors} colors for extend == {extend!r}), '
+            f'but got {len(colors)}')
 
-    cmap = ListedColormap(colors[color_slice], N=n_data_colors)
-
-    if extend in ['min', 'both']:
-        cmap.set_under(colors[0])
-    else:
-        cmap.set_under('none')
-
-    if extend in ['max', 'both']:
-        cmap.set_over(colors[-1])
-    else:
-        cmap.set_over('none')
+    data_colors = colors[color_slice]
+    under_color = colors[0] if extend in ['min', 'both'] else 'none'
+    over_color = colors[-1] if extend in ['max', 'both'] else 'none'
+    cmap = ListedColormap(data_colors, under=under_color, over=over_color)
 
     cmap.colorbar_extend = extend
 

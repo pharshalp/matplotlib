@@ -29,7 +29,7 @@ reliability and consistency in documentation. They are not interchangeable.
   +------------------+--------------------------+--------------+--------------+
   | Term             | Description              | Correct      | Incorrect    |
   +==================+==========================+==============+==============+
-  | Figure_          | Matplotlib working space | - *For       | - "The figure|
+  | |Figure|         | Matplotlib working space | - *For       | - "The figure|
   |                  | for programming.         |   Matplotlib |   is the     |
   |                  |                          |   objects*:  |   working    |
   |                  |                          |   Figure,    |   space for  |
@@ -39,11 +39,11 @@ reliability and consistency in documentation. They are not interchangeable.
   |                  |                          |   space for  |   provide the|
   |                  |                          |   the visual.|   visuals."  |
   |                  |                          | - *Referring | - "The       |
-  |                  |                          |   to class*: |   Figure_    |
-  |                  |                          |   Figure_ ,  |   Four       |
+  |                  |                          |   to class*: |   |Figure|   |
+  |                  |                          |   |Figure|,  |   Four       |
   |                  |                          |   "Methods   |   leglock is |
   |                  |                          |   within the |   a wrestling|
-  |                  |                          |   Figure_    |   move."     |
+  |                  |                          |   |Figure|   |   move."     |
   |                  |                          |   provide the|              |
   |                  |                          |   visuals."  |              |
   |                  |                          | - *General   |              |
@@ -55,28 +55,29 @@ reliability and consistency in documentation. They are not interchangeable.
   |                  |                          |   figure     |              |
   |                  |                          |   skater."   |              |
   +------------------+--------------------------+--------------+--------------+
-  | Axes_            | Subplots within Figure.  | - *For       | - "The axes  |
+  | |Axes|           | Subplots within Figure.  | - *For       | - "The axes  |
   |                  | Contains plot elements   |   Matplotlib |   methods    |
   |                  | and is responsible for   |   objects*:  |   transform  |
   |                  | plotting and configuring |   Axes, "An  |   the data." |
-  |                  | additional details.      |   Axes is a  | - "Each Axes_|
-  |                  |                          |   subplot    |   is specific|
-  |                  |                          |   within the |   to a       |
-  |                  |                          |   Figure."   |   Figure."   |
+  |                  | additional details.      |   Axes is a  | - "Each      |
+  |                  |                          |   subplot    |   |Axes| is  |
+  |                  |                          |   within the |   specific to|
+  |                  |                          |   Figure."   |   a Figure." |
   |                  |                          | - *Referring | - "The       |
   |                  |                          |   to class*: |   musicians  |
-  |                  |                          |   Axes_ ,    |   on stage   |
-  |                  |                          |   "Each Axes_|   call their |
-  |                  |                          |   is specific|   guitars    |
-  |                  |                          |   to one     |   Axes."     |
-  |                  |                          |   Figure."   | - "The point |
-  |                  |                          | - *General   |   where the  |
-  |                  |                          |   language*: |   Axes meet  |
-  |                  |                          |   axes, "Both|   is the     |
-  |                  |                          |   loggers and|   origin of  |
-  |                  |                          |   lumberjacks|   the        |
-  |                  |                          |   use axes to|   coordinate |
-  |                  |                          |   chop wood."|   system."   |
+  |                  |                          |   |Axes|,    |   on stage   |
+  |                  |                          |   "Each      |   call their |
+  |                  |                          |   |Axes| is  |   guitars    |
+  |                  |                          |   specific to|   Axes."     |
+  |                  |                          |   one        | - "The point |
+  |                  |                          |   Figure."   |   where the  |
+  |                  |                          | - *General   |   Axes meet  |
+  |                  |                          |   language*: |   is the     |
+  |                  |                          |   axes, "Both|   origin of  |
+  |                  |                          |   loggers and|   the        |
+  |                  |                          |   lumberjacks|   coordinate |
+  |                  |                          |   use axes to|   system."   |
+  |                  |                          |   chop wood."|              |
   |                  |                          |   OR "There  |              |
   |                  |                          |   are no     |              |
   |                  |                          |   standard   |              |
@@ -89,24 +90,25 @@ reliability and consistency in documentation. They are not interchangeable.
   |                  |                          |   (Plural of |              |
   |                  |                          |   axis)      |              |
   +------------------+--------------------------+--------------+--------------+
-  | Artist_          | Broad variety of         | - *For       | - "Configure |
+  | |Artist|         | Broad variety of         | - *For       | - "Configure |
   |                  | Matplotlib objects that  |   Matplotlib |   the legend |
   |                  | display visuals.         |   objects*:  |   artist with|
   |                  |                          |   Artist,    |   its        |
   |                  |                          |   "Artists   |   respective |
   |                  |                          |   display    |   method."   |
   |                  |                          |   visuals and| - "There is  |
-  |                  |                          |   are the    |   an Artist_ |
-  |                  |                          |   visible    |   for that   |
-  |                  |                          |   elements   |   visual in  |
-  |                  |                          |   when the   |   the graph."|
-  |                  |                          |   rendering  | - "Some      |
-  |                  |                          |   a Figure." |   Artists    |
-  |                  |                          | - *Referring |   became     |
-  |                  |                          |   to class*: |   famous only|
-  |                  |                          |   Artist_ ,  |   by         |
-  |                  |                          |   "Each      |   accident." |
-  |                  |                          |   Artist_ has|              |
+  |                  |                          |   are the    |   an         |
+  |                  |                          |   visible    |   |Artist|   |
+  |                  |                          |   elements   |   for that   |
+  |                  |                          |   when       |   visual in  |
+  |                  |                          |   rendering a|   the graph."|
+  |                  |                          |   Figure."   | - "Some      |
+  |                  |                          | - *Referring |   Artists    |
+  |                  |                          |   to class*: |   became     |
+  |                  |                          |   |Artist| , |   famous only|
+  |                  |                          |   "Each      |   by         |
+  |                  |                          |   |Artist|   |   accident." |
+  |                  |                          |   has        |              |
   |                  |                          |   respective |              |
   |                  |                          |   methods and|              |
   |                  |                          |   functions."|              |
@@ -119,7 +121,7 @@ reliability and consistency in documentation. They are not interchangeable.
   |                  |                          |   is from    |              |
   |                  |                          |   France."   |              |
   +------------------+--------------------------+--------------+--------------+
-  | Axis_            | Human-readable single    | - *For       | - "Plot the  |
+  | |Axis|           | Human-readable single    | - *For       | - "Plot the  |
   |                  | dimensional object       |   Matplotlib |   graph onto |
   |                  | of reference marks       |   objects*:  |   the axis." |
   |                  | containing ticks, tick   |   Axis, "The | - "Each Axis |
@@ -133,12 +135,13 @@ reliability and consistency in documentation. They are not interchangeable.
   |                  |                          |   objects)   | - "In some   |
   |                  |                          | - *Referring |   computer   |
   |                  |                          |   to class*: |   graphics   |
-  |                  |                          |   Axis_ ,    |   contexts,  |
-  |                  |                          |   "The Axis_ |   the        |
-  |                  |                          |   contains   |   ordinate   |
-  |                  |                          |   respective |   Axis_ may  |
-  |                  |                          |   XAxis and  |   be oriented|
-  |                  |                          |   YAxis      |   downwards."|
+  |                  |                          |   |Axis|,    |   contexts,  |
+  |                  |                          |   "The       |   the        |
+  |                  |                          |   |Axis|     |   ordinate   |
+  |                  |                          |   contains   |   |Axis| may |
+  |                  |                          |   respective |   be oriented|
+  |                  |                          |   XAxis and  |   downwards."|
+  |                  |                          |   YAxis      |              |
   |                  |                          |   objects."  |              |
   |                  |                          | - *General   |              |
   |                  |                          |   language*: |              |
@@ -152,20 +155,70 @@ reliability and consistency in documentation. They are not interchangeable.
   |                  |                          |   rotational |              |
   |                  |                          |   motion."   |              |
   +------------------+--------------------------+--------------+--------------+
-  | Explicit,        | Explicit approach of     | - Explicit   | - object     |
-  | Object Oriented  | programming in           | - explicit   |   oriented   |
-  | Programming (OOP)| Matplotlib.              | - OOP        | - OO-style   |
+  | Axes interface   | Usage pattern in which   | - Axes       | - explicit   |
+  |                  | one calls methods on     |   interface  |   interface  |
+  |                  | Axes and Figure (and     | - call       | - object     |
+  |                  | sometimes other Artist)  |   methods on |   oriented   |
+  |                  | objects to configure the |   the Axes / | - OO-style   |
+  |                  | plot.                    |   Figure     | - OOP        |
+  |                  |                          |   object     |              |
   +------------------+--------------------------+--------------+--------------+
-  | Implicit,        | Implicit approach of     | - Implicit   | - MATLAB like|
-  | ``pyplot``       | programming in Matplotlib| - implicit   | - Pyplot     |
-  |                  | with ``pyplot`` module.  | - ``pyplot`` | - pyplot     |
-  |                  |                          |              |   interface  |
+  | pyplot interface | Usage pattern in which   | - ``pyplot`` | - implicit   |
+  |                  | one only calls `.pyplot` |   interface  |   interface  |
+  |                  | functions to configure   | - call       | - MATLAB like|
+  |                  | the plot.                |   ``pyplot`` | - Pyplot     |
+  |                  |                          |   functions  |              |
   +------------------+--------------------------+--------------+--------------+
 
-.. _Figure: :class:`~matplotlib.figure.Figure`
-.. _Axes: :class:`~matplotlib.axes.Axes`
-.. _Artist: :class:`~matplotlib.artist.Artist`
-.. _Axis: :class:`matplotlib.axis.Axis`
+.. |Figure| replace:: :class:`~matplotlib.figure.Figure`
+.. |Axes| replace:: :class:`~matplotlib.axes.Axes`
+.. |Artist| replace:: :class:`~matplotlib.artist.Artist`
+.. |Axis| replace:: :class:`~matplotlib.axis.Axis`
+
+
+Headings
+--------
+Use sentence case for headings.
+
+.. table::
+   :width: 100%
+   :widths: 50, 50
+
+   +------------------------------------+------------------------------------+
+   | Correct                            | Incorrect                          |
+   +====================================+====================================+
+   | Quick start guide                  | Quick Start Guide                  |
+   +------------------------------------+------------------------------------+
+
+Noun phrases and verb phrases are both acceptable for headings. Noun phrases
+are preferred for higher-level headings and descriptive sections as they
+simply state the content.
+
+.. table::
+   :width: 100%
+   :widths: 50, 50
+
+   +------------------------------------+------------------------------------+
+   | Correct                            | Incorrect                          |
+   +====================================+====================================+
+   | Bug triage and issue curation      | Triage bugs and curate issues      |
+   +------------------------------------+------------------------------------+
+
+Verb phrases are preferred for instructive and action-oriented sections; in
+particular when they cover steps in a process, such as the subsections in
+:ref:`installing_for_devs`.
+
+Use the second-person imperative form of the verb rather than the gerund form.
+
+.. table::
+   :width: 100%
+   :widths: 50, 50
+
+   +------------------------------------+------------------------------------+
+   | Correct                            | Incorrect                          |
+   +====================================+====================================+
+   | Fork the Matplotlib repository     | Forking the Matplotlib repository  |
+   +------------------------------------+------------------------------------+
 
 
 Grammar
@@ -406,4 +459,3 @@ resources contain common best practices for writing documentation.
 * `Google Developer Style Guide <https://developers.google.com/style>`_
 * `IBM Style Guide <https://www.oreilly.com/library/view/the-ibm-style/9780132118989/>`_
 * `Red Hat Style Guide <https://stylepedia.net/style/#grammar>`_
-

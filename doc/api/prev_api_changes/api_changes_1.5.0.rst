@@ -41,7 +41,7 @@ fully delegate to `.Quiver`).  Previously any input matching 'mid.*' would be
 interpreted as 'middle', 'tip.*' as 'tip' and any string not matching one of
 those patterns as 'tail'.
 
-The value of `.Quiver.pivot` is normalized to be in the set {'tip', 'tail',
+The value of ``Quiver.pivot`` is normalized to be in the set {'tip', 'tail',
 'middle'} in `.Quiver`.
 
 Reordered ``Axes.get_children``
@@ -116,10 +116,10 @@ In either case to update the data in the `.Line2D` object you must update
 both the ``x`` and ``y`` data.
 
 
-Removed *args* and *kwargs* from `.MicrosecondLocator.__call__`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Removed *args* and *kwargs* from ``MicrosecondLocator.__call__``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The call signature of :meth:`~matplotlib.dates.MicrosecondLocator.__call__`
+The call signature of ``matplotlib.dates.MicrosecondLocator.__call__``
 has changed from ``__call__(self, *args, **kwargs)`` to ``__call__(self)``.
 This is consistent with the superclass :class:`~matplotlib.ticker.Locator`
 and also all the other Locators derived from this superclass.
@@ -189,7 +189,7 @@ algorithm that was not necessarily applicable to custom Axes. Three new private
 methods, ``matplotlib.axes._base._AxesBase._get_view``,
 ``matplotlib.axes._base._AxesBase._set_view``, and
 ``matplotlib.axes._base._AxesBase._set_view_from_bbox``, allow for custom
-*Axes* classes to override the pan and zoom algorithms. Implementors of
+*Axes* classes to override the pan and zoom algorithms. Implementers of
 custom *Axes* who override these methods may provide suitable behaviour for
 both pan and zoom as well as the view navigation buttons on the interactive
 toolbars.
@@ -374,8 +374,8 @@ directly.
 patheffects.svg
 ~~~~~~~~~~~~~~~
 
- - remove ``get_proxy_renderer`` method from ``AbstarctPathEffect`` class
- - remove ``patch_alpha`` and ``offset_xy`` from ``SimplePatchShadow``
+- remove ``get_proxy_renderer`` method from ``AbstractPathEffect`` class
+- remove ``patch_alpha`` and ``offset_xy`` from ``SimplePatchShadow``
 
 
 Remove ``testing.image_util.py``

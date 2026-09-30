@@ -17,6 +17,7 @@ Classes
 
    Line2D
    VertexSelector
+   AxLine
 
 Functions
 ---------
@@ -26,4 +27,3 @@ Functions
    :template: autosummary.rst
 
    segment_hits
-   

@@ -1,11 +1,14 @@
 from pathlib import Path
 import shutil
 
+import numpy as np
 import pytest
 from pytest import approx
 
-from matplotlib.testing.compare import compare_images, make_test_filename
+from matplotlib import _image
+from matplotlib.testing.compare import compare_images
 from matplotlib.testing.decorators import _image_directories
+from matplotlib.testing.exceptions import ImageComparisonFailure
 
 
 # Tests of the image comparison algorithm.
@@ -42,7 +45,8 @@ from matplotlib.testing.decorators import _image_directories
         # Now test the reverse comparison.
         ('all128.png', 'all127.png', 0, 1),
     ])
-def test_image_comparison_expect_rms(im1, im2, tol, expect_rms):
+def test_image_comparison_expect_rms(im1, im2, tol, expect_rms, tmp_path,
+                                     monkeypatch):
     """
     Compare two images, expecting a particular RMS error.
 
@@ -54,19 +58,43 @@ def test_image_comparison_expect_rms(im1, im2, tol, expect_rms):
     succeed if compare_images succeeds. Otherwise, the test will succeed if
     compare_images fails and returns an RMS error almost equal to this value.
     """
+    # Change the working directory using monkeypatch to use a temporary
+    # test specific directory
+    monkeypatch.chdir(tmp_path)
     baseline_dir, result_dir = map(Path, _image_directories(lambda: "dummy"))
-    # Copy both "baseline" and "test" image to result_dir, so that 1)
-    # compare_images writes the diff to result_dir, rather than to the source
-    # tree and 2) the baseline image doesn't appear missing to triage_tests.py.
-    result_im1 = make_test_filename(result_dir / im1, "expected")
-    shutil.copyfile(baseline_dir / im1, result_im1)
+    # Copy "test" image to result_dir, so that compare_images writes
+    # the diff to result_dir, rather than to the source tree
     result_im2 = result_dir / im1
     shutil.copyfile(baseline_dir / im2, result_im2)
     results = compare_images(
-        result_im1, result_im2, tol=tol, in_decorator=True)
+        baseline_dir / im1, result_im2, tol=tol, in_decorator=True)
 
     if expect_rms is None:
         assert results is None
     else:
         assert results is not None
         assert results['rms'] == approx(expect_rms, abs=1e-4)
+
+
+def test_invalid_input():
+    img = np.zeros((16, 16, 4), dtype=np.uint8)
+
+    with pytest.raises(ImageComparisonFailure,
+                       match='must be 3-dimensional, but is 2-dimensional'):
+        _image.calculate_rms_and_diff(img[:, :, 0], img)
+    with pytest.raises(ImageComparisonFailure,
+                       match='must be 3-dimensional, but is 5-dimensional'):
+        _image.calculate_rms_and_diff(img, img[:, :, :, np.newaxis, np.newaxis])
+    with pytest.raises(ImageComparisonFailure,
+                       match='must be RGB or RGBA but has depth 2'):
+        _image.calculate_rms_and_diff(img[:, :, :2], img)
+
+    with pytest.raises(ImageComparisonFailure,
+                       match=r'expected size: \(16, 16, 4\) actual size \(8, 16, 4\)'):
+        _image.calculate_rms_and_diff(img, img[:8, :, :])
+    with pytest.raises(ImageComparisonFailure,
+                       match=r'expected size: \(16, 16, 4\) actual size \(16, 6, 4\)'):
+        _image.calculate_rms_and_diff(img, img[:, :6, :])
+    with pytest.raises(ImageComparisonFailure,
+                       match=r'expected size: \(16, 16, 4\) actual size \(16, 16, 3\)'):
+        _image.calculate_rms_and_diff(img, img[:, :, :3])

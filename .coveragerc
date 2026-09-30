@@ -1,5 +1,6 @@
 [run]
 branch = true
+patch = subprocess
 source =
     matplotlib
     mpl_toolkits
@@ -12,3 +13,5 @@ exclude_lines =
     def __str__
     def __repr__
     if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    if typing.TYPE_CHECKING:

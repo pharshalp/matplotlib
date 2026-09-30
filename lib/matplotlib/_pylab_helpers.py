@@ -4,7 +4,6 @@ Manage figures for the pyplot interface.
 
 import atexit
 from collections import OrderedDict
-import gc
 
 
 class Gcf:
@@ -54,6 +53,8 @@ class Gcf:
         two managers share the same number.
         """
         if all(hasattr(num, attr) for attr in ["num", "destroy"]):
+            # num is a manager-like instance (not necessarily a
+            # FigureManagerBase subclass)
             manager = num
             if cls.figs.get(manager.num) is manager:
                 cls.figs.pop(manager.num)
@@ -65,27 +66,22 @@ class Gcf:
         if hasattr(manager, "_cidgcf"):
             manager.canvas.mpl_disconnect(manager._cidgcf)
         manager.destroy()
-        gc.collect(1)
 
     @classmethod
     def destroy_fig(cls, fig):
         """Destroy figure *fig*."""
-        num = next((manager.num for manager in cls.figs.values()
-                    if manager.canvas.figure == fig), None)
-        if num is not None:
-            cls.destroy(num)
+        manager = next((manager for manager in cls.figs.values()
+                       if manager.canvas.figure == fig), None)
+        if manager is not None:
+            cls.destroy(manager)
 
     @classmethod
     def destroy_all(cls):
         """Destroy all figures."""
-        # Reimport gc in case the module globals have already been removed
-        # during interpreter shutdown.
-        import gc
         for manager in list(cls.figs.values()):
             manager.canvas.mpl_disconnect(manager._cidgcf)
             manager.destroy()
         cls.figs.clear()
-        gc.collect(1)
 
     @classmethod
     def has_fignum(cls, num):
@@ -114,7 +110,7 @@ class Gcf:
             manager._cidgcf = manager.canvas.mpl_connect(
                 "button_press_event", lambda event: cls.set_active(manager))
         fig = manager.canvas.figure
-        fig.number = manager.num
+        fig._number = manager.num
         label = fig.get_label()
         if label:
             manager.set_window_title(label)

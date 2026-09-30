@@ -14,26 +14,58 @@
    :no-members:
    :no-inherited-members:
 
-Classes
--------
+Color norms
+-----------
 
 .. autosummary::
    :toctree: _as_gen/
    :template: autosummary.rst
 
-   BoundaryNorm
-   Colormap
-   CenteredNorm
-   LightSource
-   LinearSegmentedColormap
-   ListedColormap
-   LogNorm
-   NoNorm
+   Norm
    Normalize
+   NoNorm
+   AsinhNorm
+   BoundaryNorm
+   CenteredNorm
+   FuncNorm
+   LogNorm
    PowerNorm
    SymLogNorm
    TwoSlopeNorm
-   FuncNorm
+   MultiNorm
+
+Univariate Colormaps
+--------------------
+
+.. autosummary::
+   :toctree: _as_gen/
+   :template: autosummary.rst
+
+   Colormap
+   LinearSegmentedColormap
+   ListedColormap
+
+Multivariate Colormaps
+----------------------
+
+.. autosummary::
+   :toctree: _as_gen/
+   :template: autosummary.rst
+
+   BivarColormap
+   SegmentedBivarColormap
+   BivarColormapFromImage
+   MultivarColormap
+
+Other classes
+-------------
+
+.. autosummary::
+   :toctree: _as_gen/
+   :template: autosummary.rst
+
+   ColorSequenceRegistry
+   LightSource
 
 Functions
 ---------
@@ -53,3 +85,17 @@ Functions
    same_color
    get_named_colors_mapping
    make_norm_from_scale
+
+Exported colors
+---------------
+
+The data used to populate the :doc:`/gallery/color/named_colors` are exposed
+as dictionaries that map color names to hex strings.
+
+.. py:data:: BASE_COLORS
+
+.. py:data:: TABLEAU_COLORS
+
+.. py:data:: CSS4_COLORS
+
+.. py:data:: XKCD_COLORS

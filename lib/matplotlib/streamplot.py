@@ -5,12 +5,11 @@ Streamline plotting for 2D vector fields.
 
 import numpy as np
 
-import matplotlib
-from matplotlib import _api, cm
+import matplotlib as mpl
+from matplotlib import _api, colorizer, patches
 import matplotlib.colors as mcolors
 import matplotlib.collections as mcollections
 import matplotlib.lines as mlines
-import matplotlib.patches as patches
 
 
 __all__ = ['streamplot']
@@ -19,7 +18,9 @@ __all__ = ['streamplot']
 def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
                cmap=None, norm=None, arrowsize=1, arrowstyle='-|>',
                minlength=0.1, transform=None, zorder=None, start_points=None,
-               maxlength=4.0, integration_direction='both'):
+               maxlength=4.0, integration_direction='both',
+               broken_streamlines=True, *, integration_max_step_scale=1.0,
+               integration_max_error_scale=1.0, num_arrows=1):
     """
     Draw streamlines of a vector flow.
 
@@ -39,19 +40,17 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         For different densities in each direction, use a tuple
         (density_x, density_y).
     linewidth : float or 2D array
-        The width of the stream lines. With a 2D array the line width can be
+        The width of the streamlines. With a 2D array the line width can be
         varied across the grid. The array must have the same shape as *u*
         and *v*.
-    color : color or 2D array
+    color : :mpltype:`color` or 2D array
         The streamline color. If given an array, its values are converted to
         colors using *cmap* and *norm*.  The array must have the same shape
         as *u* and *v*.
-    cmap : `~matplotlib.colors.Colormap`
-        Colormap used to plot streamlines and arrows. This is only used if
-        *color* is an array.
-    norm : `~matplotlib.colors.Normalize`
-        Normalize object used to scale luminance data to 0, 1. If ``None``,
-        stretch (min, max) to (0, 1). This is only used if *color* is an array.
+    cmap, norm
+        Data normalization and colormapping parameters for *color*; only used
+        if *color* is an array of floats. See `~.Axes.imshow` for a detailed
+        description.
     arrowsize : float
         Scaling factor for the arrow size.
     arrowstyle : str
@@ -59,11 +58,11 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         See `~matplotlib.patches.FancyArrowPatch`.
     minlength : float
         Minimum length of streamline in axes coordinates.
-    start_points : Nx2 array
+    start_points : (N, 2) array
         Coordinates of starting points for the streamlines in data coordinates
         (the same coordinates as the *x* and *y* arrays).
-    zorder : int
-        The zorder of the stream lines and arrows.
+    zorder : float
+        The zorder of the streamlines and arrows.
         Artists with lower zorder values are drawn first.
     maxlength : float
         Maximum length of streamline in axes coordinates.
@@ -71,6 +70,33 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         Integrate the streamline in forward, backward or both directions.
     data : indexable object, optional
         DATA_PARAMETER_PLACEHOLDER
+    broken_streamlines : boolean, default: True
+        If False, forces streamlines to continue until they
+        leave the plot domain.  If True, they may be terminated if they
+        come too close to another streamline.
+    integration_max_step_scale : float, default: 1.0
+        Multiplier on the maximum allowable step in the streamline integration routine.
+        A value between zero and one results in a max integration step smaller than
+        the default max step, resulting in more accurate streamlines at the cost
+        of greater computation time; a value greater than one does the converse. Must be
+        greater than zero.
+
+        .. versionadded:: 3.11
+
+    integration_max_error_scale : float, default: 1.0
+        Multiplier on the maximum allowable error in the streamline integration routine.
+        A value between zero and one results in a tighter max integration error than
+        the default max error, resulting in more accurate streamlines at the cost
+        of greater computation time; a value greater than one does the converse. Must be
+        greater than zero.
+
+        .. versionadded:: 3.11
+
+    num_arrows : int
+        Number of arrows per streamline. The arrows are spaced equally along the steps
+        each streamline takes. Note that this can be different to being spaced equally
+        along the distance of the streamline.
+
 
     Returns
     -------
@@ -80,7 +106,7 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         - ``lines``: `.LineCollection` of streamlines
 
         - ``arrows``: `.PatchCollection` containing `.FancyArrowPatch`
-          objects representing the arrows half-way along stream lines.
+          objects representing the arrows half-way along streamlines.
 
         This container will probably change in the future to allow changes
         to the colormap, alpha, etc. for both lines and arrows, but these
@@ -89,6 +115,21 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
     grid = Grid(x, y)
     mask = StreamMask(density)
     dmap = DomainMap(grid, mask)
+
+    if integration_max_step_scale <= 0.0:
+        raise ValueError(
+            "The value of integration_max_step_scale must be > 0, " +
+            f"got {integration_max_step_scale}"
+        )
+
+    if integration_max_error_scale <= 0.0:
+        raise ValueError(
+            "The value of integration_max_error_scale must be > 0, " +
+            f"got {integration_max_error_scale}"
+        )
+
+    if num_arrows < 0:
+        raise ValueError(f"The value of num_arrows must be >= 0, got {num_arrows=}")
 
     if zorder is None:
         zorder = mlines.Line2D.zorder
@@ -100,8 +141,7 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
     if color is None:
         color = axes._get_lines.get_next_color()
 
-    if linewidth is None:
-        linewidth = matplotlib.rcParams['lines.linewidth']
+    linewidth = mpl._val_or_rc(linewidth, 'lines.linewidth')
 
     line_kw = {}
     arrow_kw = dict(arrowstyle=arrowstyle, mutation_scale=10 * arrowsize)
@@ -150,7 +190,9 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         for xm, ym in _gen_starting_points(mask.shape):
             if mask[ym, xm] == 0:
                 xg, yg = dmap.mask2grid(xm, ym)
-                t = integrate(xg, yg)
+                t = integrate(xg, yg, broken_streamlines,
+                              integration_max_step_scale,
+                              integration_max_error_scale)
                 if t is not None:
                     trajectories.append(t)
     else:
@@ -160,8 +202,8 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         for xs, ys in sp2:
             if not (grid.x_origin <= xs <= grid.x_origin + grid.width and
                     grid.y_origin <= ys <= grid.y_origin + grid.height):
-                raise ValueError("Starting point ({}, {}) outside of data "
-                                 "boundaries".format(xs, ys))
+                raise ValueError(f"Starting point ({xs}, {ys}) outside of "
+                                 "data boundaries")
 
         # Convert start_points from data to array coords
         # Shift the seed points from the bottom left of the data so that
@@ -178,14 +220,15 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
             xg = np.clip(xg, 0, grid.nx - 1)
             yg = np.clip(yg, 0, grid.ny - 1)
 
-            t = integrate(xg, yg)
+            t = integrate(xg, yg, broken_streamlines, integration_max_step_scale,
+                          integration_max_error_scale)
             if t is not None:
                 trajectories.append(t)
 
     if use_multicolor_lines:
         if norm is None:
             norm = mcolors.Normalize(color.min(), color.max())
-        cmap = cm.get_cmap(cmap)
+        cmap = colorizer._ensure_cmap(cmap)
 
     streamlines = []
     arrows = []
@@ -196,28 +239,39 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         tx += grid.x_origin
         ty += grid.y_origin
 
-        points = np.transpose([tx, ty]).reshape(-1, 1, 2)
-        streamlines.extend(np.hstack([points[:-1], points[1:]]))
+        # Create multiple tiny segments if varying width or color is given
+        if isinstance(linewidth, np.ndarray) or use_multicolor_lines:
+            points = np.transpose([tx, ty]).reshape(-1, 1, 2)
+            streamlines.extend(np.hstack([points[:-1], points[1:]]))
+        else:
+            points = np.transpose([tx, ty])
+            streamlines.append(points)
 
-        # Add arrows half way along each trajectory.
+        # Distance along streamline
         s = np.cumsum(np.hypot(np.diff(tx), np.diff(ty)))
-        n = np.searchsorted(s, s[-1] / 2.)
-        arrow_tail = (tx[n], ty[n])
-        arrow_head = (np.mean(tx[n:n + 2]), np.mean(ty[n:n + 2]))
-
         if isinstance(linewidth, np.ndarray):
             line_widths = interpgrid(linewidth, tgx, tgy)[:-1]
             line_kw['linewidth'].extend(line_widths)
-            arrow_kw['linewidth'] = line_widths[n]
-
         if use_multicolor_lines:
             color_values = interpgrid(color, tgx, tgy)[:-1]
             line_colors.append(color_values)
-            arrow_kw['color'] = cmap(norm(color_values[n]))
 
-        p = patches.FancyArrowPatch(
-            arrow_tail, arrow_head, transform=transform, **arrow_kw)
-        arrows.append(p)
+        # Add arrows along each trajectory.
+        for x in range(1, num_arrows+1):
+            # Get index of distance along streamline to place arrow
+            idx = np.searchsorted(s, s[-1] * (x/(num_arrows+1)))
+            arrow_tail = (tx[idx], ty[idx])
+            arrow_head = (np.mean(tx[idx:idx + 2]), np.mean(ty[idx:idx + 2]))
+
+            if isinstance(linewidth, np.ndarray):
+                arrow_kw['linewidth'] = line_widths[idx]
+
+            if use_multicolor_lines:
+                arrow_kw['color'] = cmap(norm(color_values[idx]))
+
+            p = patches.FancyArrowPatch(
+                arrow_tail, arrow_head, transform=transform, **arrow_kw)
+            arrows.append(p)
 
     lc = mcollections.LineCollection(
         streamlines, transform=transform, **line_kw)
@@ -229,7 +283,7 @@ def streamplot(axes, x, y, u, v, density=1, linewidth=None, color=None,
         lc.set_norm(norm)
     axes.add_collection(lc)
 
-    ac = matplotlib.collections.PatchCollection(arrows)
+    ac = mcollections.PatchCollection(arrows)
     # Adding the collection itself is broken; see #2341.
     for p in arrows:
         axes.add_patch(p)
@@ -283,8 +337,7 @@ class DomainMap:
 
     def grid2mask(self, xi, yi):
         """Return nearest space in mask-coords from given grid-coords."""
-        return (int(xi * self.x_grid2mask + 0.5),
-                int(yi * self.y_grid2mask + 0.5))
+        return round(xi * self.x_grid2mask), round(yi * self.y_grid2mask)
 
     def mask2grid(self, xm, ym):
         return xm * self.x_mask2grid, ym * self.y_mask2grid
@@ -295,19 +348,19 @@ class DomainMap:
     def grid2data(self, xg, yg):
         return xg / self.x_data2grid, yg / self.y_data2grid
 
-    def start_trajectory(self, xg, yg):
+    def start_trajectory(self, xg, yg, broken_streamlines=True):
         xm, ym = self.grid2mask(xg, yg)
-        self.mask._start_trajectory(xm, ym)
+        self.mask._start_trajectory(xm, ym, broken_streamlines)
 
     def reset_start_point(self, xg, yg):
         xm, ym = self.grid2mask(xg, yg)
         self.mask._current_xy = (xm, ym)
 
-    def update_trajectory(self, xg, yg):
+    def update_trajectory(self, xg, yg, broken_streamlines=True):
         if not self.grid.within_grid(xg, yg):
             raise InvalidIndexError
         xm, ym = self.grid2mask(xg, yg)
-        self.mask._update_trajectory(xm, ym)
+        self.mask._update_trajectory(xm, ym, broken_streamlines)
 
     def undo_trajectory(self):
         self.mask._undo_trajectory()
@@ -397,17 +450,17 @@ class StreamMask:
     def __getitem__(self, args):
         return self._mask[args]
 
-    def _start_trajectory(self, xm, ym):
+    def _start_trajectory(self, xm, ym, broken_streamlines=True):
         """Start recording streamline trajectory"""
         self._traj = []
-        self._update_trajectory(xm, ym)
+        self._update_trajectory(xm, ym, broken_streamlines)
 
     def _undo_trajectory(self):
         """Remove current trajectory from mask"""
         for t in self._traj:
             self._mask[t] = 0
 
-    def _update_trajectory(self, xm, ym):
+    def _update_trajectory(self, xm, ym, broken_streamlines=True):
         """
         Update current trajectory position in mask.
 
@@ -419,7 +472,10 @@ class StreamMask:
                 self._mask[ym, xm] = 1
                 self._current_xy = (xm, ym)
             else:
-                raise InvalidIndexError
+                if broken_streamlines:
+                    raise InvalidIndexError
+                else:
+                    pass
 
 
 class InvalidIndexError(Exception):
@@ -458,9 +514,10 @@ def _get_integrator(u, v, dmap, minlength, maxlength, integration_direction):
         dxi, dyi = forward_time(xi, yi)
         return -dxi, -dyi
 
-    def integrate(x0, y0):
+    def integrate(x0, y0, broken_streamlines=True, integration_max_step_scale=1.0,
+                  integration_max_error_scale=1.0):
         """
-        Return (N, 2) grid-coordinates of trajectory based on starting point.
+        Return x, y grid-coordinates of trajectory based on starting point.
 
         Integrate both forward and backward in time from starting point in
         grid coordinates.
@@ -473,17 +530,23 @@ def _get_integrator(u, v, dmap, minlength, maxlength, integration_direction):
         stotal, xy_traj = 0., []
 
         try:
-            dmap.start_trajectory(x0, y0)
+            dmap.start_trajectory(x0, y0, broken_streamlines)
         except InvalidIndexError:
             return None
         if integration_direction in ['both', 'backward']:
-            s, xyt = _integrate_rk12(x0, y0, dmap, backward_time, maxlength)
+            s, xyt = _integrate_rk12(x0, y0, dmap, backward_time, maxlength,
+                                     broken_streamlines,
+                                     integration_max_step_scale,
+                                     integration_max_error_scale)
             stotal += s
             xy_traj += xyt[::-1]
 
         if integration_direction in ['both', 'forward']:
             dmap.reset_start_point(x0, y0)
-            s, xyt = _integrate_rk12(x0, y0, dmap, forward_time, maxlength)
+            s, xyt = _integrate_rk12(x0, y0, dmap, forward_time, maxlength,
+                                     broken_streamlines,
+                                     integration_max_step_scale,
+                                     integration_max_error_scale)
             stotal += s
             xy_traj += xyt[1:]
 
@@ -496,20 +559,13 @@ def _get_integrator(u, v, dmap, minlength, maxlength, integration_direction):
     return integrate
 
 
-@_api.deprecated("3.5")
-def get_integrator(u, v, dmap, minlength, maxlength, integration_direction):
-    xy_traj = _get_integrator(
-        u, v, dmap, minlength, maxlength, integration_direction)
-    return (None if xy_traj is None
-            else ([], []) if not len(xy_traj)
-            else [*zip(*xy_traj)])
-
-
 class OutOfBounds(IndexError):
     pass
 
 
-def _integrate_rk12(x0, y0, dmap, f, maxlength):
+def _integrate_rk12(x0, y0, dmap, f, maxlength, broken_streamlines=True,
+                    integration_max_step_scale=1.0,
+                    integration_max_error_scale=1.0):
     """
     2nd-order Runge-Kutta algorithm with adaptive step size.
 
@@ -535,7 +591,7 @@ def _integrate_rk12(x0, y0, dmap, f, maxlength):
     # This error is below that needed to match the RK4 integrator. It
     # is set for visual reasons -- too low and corners start
     # appearing ugly and jagged. Can be tuned.
-    maxerror = 0.003
+    maxerror = 0.003 * integration_max_error_scale
 
     # This limit is important (for all integrators) to avoid the
     # trajectory skipping some mask cells. We could relax this
@@ -544,6 +600,7 @@ def _integrate_rk12(x0, y0, dmap, f, maxlength):
     # nature of the interpolation, this doesn't boost speed by much
     # for quite a bit of complexity.
     maxds = min(1. / dmap.mask.nx, 1. / dmap.mask.ny, 0.1)
+    maxds *= integration_max_step_scale
 
     ds = maxds
     stotal = 0
@@ -589,7 +646,7 @@ def _integrate_rk12(x0, y0, dmap, f, maxlength):
             xi += dx2
             yi += dy2
             try:
-                dmap.update_trajectory(xi, yi)
+                dmap.update_trajectory(xi, yi, broken_streamlines)
             except InvalidIndexError:
                 break
             if stotal + ds > maxlength:

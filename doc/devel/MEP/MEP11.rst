@@ -47,30 +47,30 @@ Detailed description
 
 matplotlib depends on the following third-party Python libraries:
 
-   - Numpy
-   - dateutil (pure Python)
-   - pytz (pure Python)
-   - six -- required by dateutil (pure Python)
-   - pyparsing (pure Python)
-   - PIL (optional)
-   - GUI frameworks: pygtk, gobject, tkinter, PySide, PyQt4, wx (all
-     optional, but one is required for an interactive GUI)
+- Numpy
+- dateutil (pure Python)
+- pytz (pure Python)
+- six -- required by dateutil (pure Python)
+- pyparsing (pure Python)
+- PIL (optional)
+- GUI frameworks: pygtk, gobject, tkinter, PySide, PyQt4, wx (all
+  optional, but one is required for an interactive GUI)
 
 Current behavior
 ----------------
 
 When installing from source, a :program:`git` checkout or pip_:
 
-  - :file:`setup.py` attempts to ``import numpy``.  If this fails, the
-    installation fails.
+- :file:`setup.py` attempts to ``import numpy``.  If this fails, the
+  installation fails.
 
-  - For each of dateutil_, pytz_ and six_, :file:`setup.py` attempts to
-    import them (from the top-level namespace).  If that fails,
-    matplotlib installs its local copy of the library into the
-    top-level namespace.
+- For each of dateutil_, pytz_ and six_, :file:`setup.py` attempts to
+  import them (from the top-level namespace).  If that fails,
+  matplotlib installs its local copy of the library into the
+  top-level namespace.
 
-  - pyparsing_ is always installed inside of the matplotlib
-    namespace.
+- pyparsing_ is always installed inside of the matplotlib
+  namespace.
 
 This behavior is most surprising when used with pip_, because no
 pip_ dependency resolution is performed, even though it is likely to
@@ -130,12 +130,12 @@ ordered from best/hardest to worst/easiest):
 1. The distutils wininst installer allows a post-install script to
    run.  It might be possible to get this script to run pip_ to
    install the other dependencies.  (See `this thread
-   <http://grokbase.com/t/python/distutils-sig/109bdnfhp4/distutils-ann-setuptools-post-install-script-for-bdist-wininst>`_
+   <https://mail.python.org/pipermail/distutils-sig/2010-September/016857.html>`_
    for someone who has trod that ground before).
 
 2. Continue to ship dateutil_, pytz_, six_ and pyparsing_ in
    our installer, but use the post-install-script to install them
-   *only* if they can not already be found.
+   *only* if they cannot already be found.
 
 3. Move all of these packages inside a (new) ``matplotlib.extern``
    namespace so it is clear for outside users that these are
@@ -177,4 +177,4 @@ out of the box.
 .. _pytz: https://pypi.org/project/pytz/
 .. _setuptools: https://pypi.org/project/setuptools/
 .. _six: https://pypi.org/project/six/
-.. _easy_install: https://setuptools.readthedocs.io/en/latest/easy_install.html
+.. _easy_install: https://setuptools.pypa.io/en/latest/deprecated/easy_install.html

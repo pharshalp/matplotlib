@@ -1,9 +1,7 @@
 """
-GUI neutral widgets
-===================
-
 Widgets that are designed to work for any of the GUI backends.
-All of these widgets require you to predefine a `matplotlib.axes.Axes`
+
+All of these widgets require you to predefine an `~.axes.Axes`
 instance and pass that as the first parameter.  Matplotlib doesn't try to
 be too smart with respect to layout -- you will have to figure out how
 wide and tall you want your Axes to be to accommodate your widget.
@@ -11,15 +9,20 @@ wide and tall you want your Axes to be to accommodate your widget.
 
 from contextlib import ExitStack
 import copy
+import enum
+import functools
+import itertools
+import weakref
 from numbers import Integral, Number
 
+from cycler import cycler
 import numpy as np
 
 import matplotlib as mpl
-from matplotlib import docstring
-from . import _api, backend_tools, cbook, colors, ticker, transforms
+from . import (_api, _docstring, backend_tools, cbook, collections, colors,
+               text as mtext, ticker, transforms)
 from .lines import Line2D
-from .patches import Circle, Rectangle, Ellipse
+from .patches import Rectangle, Ellipse, Polygon
 from .transforms import TransformedPatchPath, Affine2D
 
 
@@ -104,19 +107,21 @@ class AxesWidget(Widget):
     Attributes
     ----------
     ax : `~matplotlib.axes.Axes`
-        The parent axes for the widget.
+        The parent Axes for the widget.
     canvas : `~matplotlib.backend_bases.FigureCanvasBase`
         The parent figure canvas for the widget.
     active : bool
         If False, the widget does not respond to events.
     """
 
-    cids = _api.deprecated("3.4")(property(lambda self: self._cids))
-
     def __init__(self, ax):
         self.ax = ax
-        self.canvas = ax.figure.canvas
         self._cids = []
+        self._blit_background_id = None
+
+    canvas = property(
+        lambda self: getattr(self.ax.get_figure(root=True), 'canvas', None)
+    )
 
     def connect_event(self, event, callback):
         """
@@ -133,6 +138,62 @@ class AxesWidget(Widget):
         for c in self._cids:
             self.canvas.mpl_disconnect(c)
 
+    def ignore(self, event):
+        # docstring inherited
+        return super().ignore(event) or self.canvas is None
+
+    def _set_cursor(self, cursor):
+        """Update the canvas cursor."""
+        self.ax.get_figure(root=True).canvas.set_cursor(cursor)
+
+    def _save_blit_background(self, background):
+        """
+        Save a blit background.
+
+        The background is stored on the canvas in a uniquely identifiable way.
+        It should be read back via `._load_blit_background`. Be prepared that
+        some events may invalidate the background, in which case
+        `._load_blit_background` will return None.
+
+        This currently allows at most one background per widget, which is
+        good enough for all existing widgets.
+        """
+        if self._blit_background_id is None:
+            bbid = self.canvas._get_blit_background_id()
+            weakref.finalize(self, self.canvas._release_blit_background_id, bbid)
+            self._blit_background_id = bbid
+        self.canvas._blit_backgrounds[self._blit_background_id] = background
+
+    def _load_blit_background(self):
+        """Load a blit background; may be None at any time."""
+        return self.canvas._blit_backgrounds.get(self._blit_background_id)
+
+
+def _call_with_reparented_event(func):
+    """
+    Event callback decorator ensuring that the callback is called with an event
+    that has been reparented to the widget's axes.
+    """
+    # This decorator handles the possibility that event.inaxes != self.ax
+    # (e.g. if multiple Axes are overlaid), in which case event.xdata/.ydata
+    # will be wrong.  Note that we still special-case the common case where
+    # event.inaxes == self.ax and avoid re-running the inverse data transform,
+    # because that can introduce floating point errors for synthetic events.
+    @functools.wraps(func)
+    def wrapper(self, event):
+        if event.inaxes is not self.ax:
+            event = copy.copy(event)
+            event.guiEvent = None
+            event.inaxes = self.ax
+            try:
+                event.xdata, event.ydata = (
+                    self.ax.transData.inverted().transform((event.x, event.y)))
+            except ValueError:  # cf LocationEvent._set_inaxes.
+                event.xdata = event.ydata = None
+        return func(self, event)
+
+    return wrapper
+
 
 class Button(AxesWidget):
     """
@@ -144,22 +205,17 @@ class Button(AxesWidget):
     Attributes
     ----------
     ax
-        The `matplotlib.axes.Axes` the button renders into.
+        The `~.axes.Axes` the button renders into.
     label
-        A `matplotlib.text.Text` instance.
+        A `.Text` instance.
     color
         The color of the button when not hovering.
     hovercolor
         The color of the button when hovering.
     """
 
-    cnt = _api.deprecated("3.4")(property(  # Not real, but close enough.
-        lambda self: len(self._observers.callbacks['clicked'])))
-    observers = _api.deprecated("3.4")(property(
-        lambda self: self._observers.callbacks['clicked']))
-
     def __init__(self, ax, label, image=None,
-                 color='0.85', hovercolor='0.95'):
+                 color='0.85', hovercolor='0.95', *, useblit=True):
         """
         Parameters
         ----------
@@ -169,11 +225,16 @@ class Button(AxesWidget):
             The button text.
         image : array-like or PIL Image
             The image to place in the button, if not *None*.  The parameter is
-            directly forwarded to `~matplotlib.axes.Axes.imshow`.
-        color : color
+            directly forwarded to `~.axes.Axes.imshow`.
+        color : :mpltype:`color`
             The color of the button when not activated.
-        hovercolor : color
+        hovercolor : :mpltype:`color`
             The color of the button when the mouse is over it.
+        useblit : bool, default: True
+            Use blitting for faster drawing if supported by the backend.
+            See the tutorial :ref:`blitting` for details.
+
+            .. versionadded:: 3.7
         """
         super().__init__(ax)
 
@@ -184,7 +245,9 @@ class Button(AxesWidget):
                              horizontalalignment='center',
                              transform=ax.transAxes)
 
-        self._observers = cbook.CallbackRegistry()
+        self._useblit = useblit
+
+        self._observers = cbook.CallbackRegistry(signals=["clicked"])
 
         self.connect_event('button_press_event', self._click)
         self.connect_event('button_release_event', self._release)
@@ -196,27 +259,34 @@ class Button(AxesWidget):
         self.color = color
         self.hovercolor = hovercolor
 
+    @_call_with_reparented_event
     def _click(self, event):
-        if self.ignore(event) or event.inaxes != self.ax or not self.eventson:
+        if not self.eventson or self.ignore(event) or not self.ax.contains(event)[0]:
             return
         if event.canvas.mouse_grabber != self.ax:
             event.canvas.grab_mouse(self.ax)
 
+    @_call_with_reparented_event
     def _release(self, event):
         if self.ignore(event) or event.canvas.mouse_grabber != self.ax:
             return
         event.canvas.release_mouse(self.ax)
-        if self.eventson and event.inaxes == self.ax:
+        if self.eventson and self.ax.contains(event)[0]:
             self._observers.process('clicked', event)
 
+    @_call_with_reparented_event
     def _motion(self, event):
         if self.ignore(event):
             return
-        c = self.hovercolor if event.inaxes == self.ax else self.color
+        c = self.hovercolor if self.ax.contains(event)[0] else self.color
         if not colors.same_color(c, self.ax.get_facecolor()):
             self.ax.set_facecolor(c)
             if self.drawon:
-                self.ax.figure.canvas.draw()
+                if self._useblit and self.canvas.supports_blit:
+                    self.ax.draw_artist(self.ax)
+                    self.canvas.blit(self.ax.bbox)
+                else:
+                    self.canvas.draw()
 
     def on_clicked(self, func):
         """
@@ -256,10 +326,10 @@ class SliderBase(AxesWidget):
         self.valfmt = valfmt
 
         if orientation == "vertical":
-            ax.set_ylim((valmin, valmax))
+            ax.set_ylim(valmin, valmax)
             axis = ax.yaxis
         else:
-            ax.set_xlim((valmin, valmax))
+            ax.set_xlim(valmin, valmax)
             axis = ax.xaxis
 
         self._fmt = axis.get_major_formatter()
@@ -276,7 +346,7 @@ class SliderBase(AxesWidget):
         self.connect_event("button_release_event", self._update)
         if dragging:
             self.connect_event("motion_notify_event", self._update)
-        self._observers = cbook.CallbackRegistry()
+        self._observers = cbook.CallbackRegistry(signals=["changed"])
 
     def _stepped_value(self, val):
         """Return *val* coerced to closest number in the ``valstep`` grid."""
@@ -313,7 +383,7 @@ class Slider(SliderBase):
     """
     A slider representing a floating point range.
 
-    Create a slider from *valmin* to *valmax* in axes *ax*. For the slider to
+    Create a slider from *valmin* to *valmax* in Axes *ax*. For the slider to
     remain responsive you must maintain a reference to it. Call
     :meth:`on_changed` to connect to the slider event.
 
@@ -323,15 +393,10 @@ class Slider(SliderBase):
         Slider value.
     """
 
-    cnt = _api.deprecated("3.4")(property(  # Not real, but close enough.
-        lambda self: len(self._observers.callbacks['changed'])))
-    observers = _api.deprecated("3.4")(property(
-        lambda self: self._observers.callbacks['changed']))
-
-    def __init__(self, ax, label, valmin, valmax, valinit=0.5, valfmt=None,
+    def __init__(self, ax, label, valmin, valmax, *, valinit=0.5, valfmt=None,
                  closedmin=True, closedmax=True, slidermin=None,
                  slidermax=None, dragging=True, valstep=None,
-                 orientation='horizontal', *, initcolor='r',
+                 orientation='horizontal', initcolor='r',
                  track_color='lightgrey', handle_style=None, **kwargs):
         """
         Parameters
@@ -352,8 +417,9 @@ class Slider(SliderBase):
             The slider initial position.
 
         valfmt : str, default: None
-            %-format string used to format the slider value.  If None, a
-            `.ScalarFormatter` is used instead.
+            The way to format the slider value. If a string, it must be in %-format.
+            If a callable, it must have the signature ``valfmt(val: float) -> str``.
+            If None, a `.ScalarFormatter` is used.
 
         closedmin : bool, default: True
             Whether the slider interval is closed on the bottom.
@@ -379,11 +445,11 @@ class Slider(SliderBase):
         orientation : {'horizontal', 'vertical'}, default: 'horizontal'
             The orientation of the slider.
 
-        initcolor : color, default: 'r'
+        initcolor : :mpltype:`color`, default: 'r'
             The color of the line at the *valinit* position. Set to ``'none'``
             for no line.
 
-        track_color : color, default: 'lightgrey'
+        track_color : :mpltype:`color`, default: 'lightgrey'
             The color of the background track. The track is accessible for
             further styling via the *track* attribute.
 
@@ -405,8 +471,8 @@ class Slider(SliderBase):
         Notes
         -----
         Additional kwargs are passed on to ``self.poly`` which is the
-        `~matplotlib.patches.Polygon` that draws the slider knob.  See the
-        `.Polygon` documentation for valid property names (``facecolor``,
+        `~matplotlib.patches.Rectangle` that draws the slider knob.  See the
+        `.Rectangle` documentation for valid property names (``facecolor``,
         ``edgecolor``, ``alpha``, etc.).
         """
         super().__init__(ax, orientation, closedmin, closedmax,
@@ -441,7 +507,7 @@ class Slider(SliderBase):
             ax.add_patch(self.track)
             self.poly = ax.axhspan(valmin, valinit, .25, .75, **kwargs)
             # Drawing a longer line and clipping it to the track avoids
-            # pixellization-related asymmetries.
+            # pixelation-related asymmetries.
             self.hline = ax.axhline(valinit, 0, 1, color=initcolor, lw=1,
                                     clip_path=TransformedPatchPath(self.track))
             handleXY = [[0.5], [valinit]]
@@ -508,35 +574,37 @@ class Slider(SliderBase):
             val = self.slidermax.val
         return val
 
+    @_call_with_reparented_event
     def _update(self, event):
         """Update the slider position."""
         if self.ignore(event) or event.button != 1:
             return
 
-        if event.name == 'button_press_event' and event.inaxes == self.ax:
+        if event.name == 'button_press_event' and self.ax.contains(event)[0]:
             self.drag_active = True
             event.canvas.grab_mouse(self.ax)
 
         if not self.drag_active:
             return
 
-        elif ((event.name == 'button_release_event') or
-              (event.name == 'button_press_event' and
-               event.inaxes != self.ax)):
+        if (event.name == 'button_release_event'
+              or event.name == 'button_press_event' and not self.ax.contains(event)[0]):
             self.drag_active = False
             event.canvas.release_mouse(self.ax)
             return
-        if self.orientation == 'vertical':
-            val = self._value_in_bounds(event.ydata)
-        else:
-            val = self._value_in_bounds(event.xdata)
+
+        val = self._value_in_bounds(
+            event.xdata if self.orientation == 'horizontal' else event.ydata)
         if val not in [None, self.val]:
             self.set_val(val)
 
     def _format(self, val):
         """Pretty-print *val*."""
         if self.valfmt is not None:
-            return self.valfmt % val
+            if callable(self.valfmt):
+                return self.valfmt(val)
+            else:
+                return self.valfmt % val
         else:
             _, s, _ = self._fmt.format_ticks([self.valmin, val, self.valmax])
             # fmt.get_offset is actually the multiplicative factor, if any.
@@ -550,19 +618,15 @@ class Slider(SliderBase):
         ----------
         val : float
         """
-        xy = self.poly.xy
         if self.orientation == 'vertical':
-            xy[1] = .25, val
-            xy[2] = .75, val
+            self.poly.set_height(val - self.poly.get_y())
             self._handle.set_ydata([val])
         else:
-            xy[2] = val, .75
-            xy[3] = val, .25
+            self.poly.set_width(val - self.poly.get_x())
             self._handle.set_xdata([val])
-        self.poly.xy = xy
         self.valtext.set_text(self._format(val))
         if self.drawon:
-            self.ax.figure.canvas.draw_idle()
+            self.ax.get_figure(root=True).canvas.draw_idle()
         self.val = val
         if self.eventson:
             self._observers.process('changed', val)
@@ -591,7 +655,7 @@ class RangeSlider(SliderBase):
     max of the range via the *val* attribute as a tuple of (min, max).
 
     Create a slider that defines a range contained within [*valmin*, *valmax*]
-    in axes *ax*. For the slider to remain responsive you must maintain a
+    in Axes *ax*. For the slider to remain responsive you must maintain a
     reference to it. Call :meth:`on_changed` to connect to the slider event.
 
     Attributes
@@ -606,6 +670,7 @@ class RangeSlider(SliderBase):
         label,
         valmin,
         valmax,
+        *,
         valinit=None,
         valfmt=None,
         closedmin=True,
@@ -636,9 +701,11 @@ class RangeSlider(SliderBase):
             The initial positions of the slider. If None the initial positions
             will be at the 25th and 75th percentiles of the range.
 
-        valfmt : str, default: None
-            %-format string used to format the slider values.  If None, a
-            `.ScalarFormatter` is used instead.
+        valfmt : str or callable, default: None
+            The way to format the range's minimal and maximal values. If a
+            string, it must be in %-format. If a callable, it must have the
+            signature ``valfmt(val: float) -> str``. If None, a
+            `.ScalarFormatter` is used.
 
         closedmin : bool, default: True
             Whether the slider interval is closed on the bottom.
@@ -655,7 +722,7 @@ class RangeSlider(SliderBase):
         orientation : {'horizontal', 'vertical'}, default: 'horizontal'
             The orientation of the slider.
 
-        track_color : color, default: 'lightgrey'
+        track_color : :mpltype:`color`, default: 'lightgrey'
             The color of the background track. The track is accessible for
             further styling via the *track* attribute.
 
@@ -685,7 +752,7 @@ class RangeSlider(SliderBase):
                          valmin, valmax, valfmt, dragging, valstep)
 
         # Set a value to allow _value_in_bounds() to work.
-        self.val = [valmin, valmax]
+        self.val = (valmin, valmax)
         if valinit is None:
             # Place at the 25th and 75th percentiles
             extent = valmax - valmin
@@ -709,7 +776,7 @@ class RangeSlider(SliderBase):
                 facecolor=track_color
             )
             ax.add_patch(self.track)
-            self.poly = ax.axhspan(valinit[0], valinit[1], 0, 1, **kwargs)
+            poly_transform = self.ax.get_yaxis_transform(which="grid")
             handleXY_1 = [.5, valinit[0]]
             handleXY_2 = [.5, valinit[1]]
         else:
@@ -719,9 +786,15 @@ class RangeSlider(SliderBase):
                 facecolor=track_color
             )
             ax.add_patch(self.track)
-            self.poly = ax.axvspan(valinit[0], valinit[1], 0, 1, **kwargs)
+            poly_transform = self.ax.get_xaxis_transform(which="grid")
             handleXY_1 = [valinit[0], .5]
             handleXY_2 = [valinit[1], .5]
+        self.poly = Polygon(np.zeros([5, 2]), **kwargs)
+        self._update_selection_poly(*valinit)
+        self.poly.set_transform(poly_transform)
+        self.poly.get_path()._interpolation_steps = 100
+        self.ax.add_patch(self.poly)
+        self.ax._request_autoscale_view()
         self._handles = [
             ax.plot(
                 *handleXY_1,
@@ -777,6 +850,27 @@ class RangeSlider(SliderBase):
         self._active_handle = None
         self.set_val(valinit)
 
+    def _update_selection_poly(self, vmin, vmax):
+        """
+        Update the vertices of the *self.poly* slider in-place
+        to cover the data range *vmin*, *vmax*.
+        """
+        # The vertices are positioned
+        #  1 ------ 2
+        #  |        |
+        # 0, 4 ---- 3
+        verts = self.poly.xy
+        if self.orientation == "vertical":
+            verts[0] = verts[4] = .25, vmin
+            verts[1] = .25, vmax
+            verts[2] = .75, vmax
+            verts[3] = .75, vmin
+        else:
+            verts[0] = verts[4] = vmin, .25
+            verts[1] = vmin, .75
+            verts[2] = vmax, .75
+            verts[3] = vmax, .25
+
     def _min_in_bounds(self, min):
         """Ensure the new min value is between valmin and self.val[1]."""
         if min <= self.valmin:
@@ -813,48 +907,53 @@ class RangeSlider(SliderBase):
             val = self._max_in_bounds(pos)
             self.set_max(val)
         if self._active_handle:
-            self._active_handle.set_xdata([val])
+            if self.orientation == "vertical":
+                self._active_handle.set_ydata([val])
+            else:
+                self._active_handle.set_xdata([val])
 
+    @_call_with_reparented_event
     def _update(self, event):
         """Update the slider position."""
         if self.ignore(event) or event.button != 1:
             return
 
-        if event.name == "button_press_event" and event.inaxes == self.ax:
+        if event.name == "button_press_event" and self.ax.contains(event)[0]:
             self.drag_active = True
             event.canvas.grab_mouse(self.ax)
 
         if not self.drag_active:
             return
 
-        elif (event.name == "button_release_event") or (
-            event.name == "button_press_event" and event.inaxes != self.ax
-        ):
+        if (event.name == "button_release_event"
+              or event.name == "button_press_event" and not self.ax.contains(event)[0]):
             self.drag_active = False
             event.canvas.release_mouse(self.ax)
             self._active_handle = None
             return
 
         # determine which handle was grabbed
-        handle = self._handles[
-            np.argmin(
-                np.abs([h.get_xdata()[0] - event.xdata for h in self._handles])
-            )
-        ]
+        handle_index = np.argmin(np.abs(
+            [h.get_xdata()[0] - event.xdata for h in self._handles]
+            if self.orientation == "horizontal" else
+            [h.get_ydata()[0] - event.ydata for h in self._handles]))
+        handle = self._handles[handle_index]
+
         # these checks ensure smooth behavior if the handles swap which one
         # has a higher value. i.e. if one is dragged over and past the other.
         if handle is not self._active_handle:
             self._active_handle = handle
 
-        if self.orientation == "vertical":
-            self._update_val_from_pos(event.ydata)
-        else:
-            self._update_val_from_pos(event.xdata)
+        self._update_val_from_pos(
+            event.xdata if self.orientation == "horizontal" else event.ydata)
 
     def _format(self, val):
         """Pretty-print *val*."""
         if self.valfmt is not None:
-            return f"({self.valfmt % val[0]}, {self.valfmt % val[1]})"
+            if callable(self.valfmt):
+                return f"({self.valfmt(val[0])}, {self.valfmt(val[1])})"
+            else:
+                return f"({self.valfmt % val[0]}, {self.valfmt % val[1]})"
         else:
             _, s1, s2, _ = self._fmt.format_ticks(
                 [self.valmin, *val, self.valmax]
@@ -895,28 +994,24 @@ class RangeSlider(SliderBase):
         """
         val = np.sort(val)
         _api.check_shape((2,), val=val)
-        val[0] = self._min_in_bounds(val[0])
-        val[1] = self._max_in_bounds(val[1])
-        xy = self.poly.xy
+        # Reset value to allow _value_in_bounds() to work.
+        self.val = (self.valmin, self.valmax)
+        vmin, vmax = self._value_in_bounds(val)
+        self._update_selection_poly(vmin, vmax)
         if self.orientation == "vertical":
-            xy[0] = .25, val[0]
-            xy[1] = .25, val[1]
-            xy[2] = .75, val[1]
-            xy[3] = .75, val[0]
-            xy[4] = .25, val[0]
+            self._handles[0].set_ydata([vmin])
+            self._handles[1].set_ydata([vmax])
         else:
-            xy[0] = val[0], .25
-            xy[1] = val[0], .75
-            xy[2] = val[1], .75
-            xy[3] = val[1], .25
-            xy[4] = val[0], .25
-        self.poly.xy = xy
-        self.valtext.set_text(self._format(val))
+            self._handles[0].set_xdata([vmin])
+            self._handles[1].set_xdata([vmax])
+
+        self.valtext.set_text(self._format((vmin, vmax)))
+
         if self.drawon:
-            self.ax.figure.canvas.draw_idle()
-        self.val = val
+            self.ax.get_figure(root=True).canvas.draw_idle()
+        self.val = (vmin, vmax)
         if self.eventson:
-            self._observers.process("changed", val)
+            self._observers.process("changed", (vmin, vmax))
 
     def on_changed(self, func):
         """
@@ -926,7 +1021,7 @@ class RangeSlider(SliderBase):
         ----------
         func : callable
             Function to call when slider is changed. The function
-            must accept a numpy array with shape (2,) as its argument.
+            must accept a 2-tuple of floats as its argument.
 
         Returns
         -------
@@ -936,155 +1031,462 @@ class RangeSlider(SliderBase):
         return self._observers.connect('changed', lambda val: func(val))
 
 
-class CheckButtons(AxesWidget):
-    r"""
-    A GUI neutral set of check buttons.
+def _expand_text_props(props):
+    props = cbook.normalize_kwargs(props, mtext.Text)
+    return cycler(**props)() if props else itertools.repeat({})
 
-    For the check buttons to remain responsive you must keep a
-    reference to this object.
 
-    Connect to the CheckButtons with the `.on_clicked` method.
+class _Buttons(AxesWidget):
+    """
+    The base class for `CheckButtons` and `RadioButtons`.
 
-    Attributes
-    ----------
-    ax : `~matplotlib.axes.Axes`
-        The parent axes for the widget.
-    labels : list of `.Text`
+    This class provides common functionality for button widgets,
+    such as handling click events, managing button labels, and connecting callbacks.
 
-    rectangles : list of `.Rectangle`
-
-    lines : list of (`.Line2D`, `.Line2D`) pairs
-        List of lines for the x's in the check boxes.  These lines exist for
-        each box, but have ``set_visible(False)`` when its box is not checked.
+    The class itself is private and may be changed or removed without prior warning.
+    However, the public API it provides to subclasses is stable and considered
+    public on the subclasses.
     """
 
-    cnt = _api.deprecated("3.4")(property(  # Not real, but close enough.
-        lambda self: len(self._observers.callbacks['clicked'])))
-    observers = _api.deprecated("3.4")(property(
-        lambda self: self._observers.callbacks['clicked']))
-
-    def __init__(self, ax, labels, actives=None):
-        """
-        Add check buttons to `matplotlib.axes.Axes` instance *ax*.
-
-        Parameters
-        ----------
-        ax : `~matplotlib.axes.Axes`
-            The parent axes for the widget.
-
-        labels : list of str
-            The labels of the check buttons.
-
-        actives : list of bool, optional
-            The initial check states of the buttons. The list must have the
-            same length as *labels*. If not given, all buttons are unchecked.
-        """
+    def __init__(self, ax, labels, *, useblit=True, label_props=None, layout=None,
+                 **kwargs):
         super().__init__(ax)
 
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_navigate(False)
 
-        if actives is None:
-            actives = [False] * len(labels)
+        self._useblit = useblit
 
-        if len(labels) > 1:
-            dy = 1. / (len(labels) + 1)
-            ys = np.linspace(1 - dy, dy, len(labels))
-        else:
-            dy = 0.25
-            ys = [0.5]
+        self._init_layout(layout, labels, label_props)
+        text_size = np.array([text.get_fontsize() for text in self.labels]) / 2
 
-        axcolor = ax.get_facecolor()
-
-        self.labels = []
-        self.lines = []
-        self.rectangles = []
-
-        lineparams = {'color': 'k', 'linewidth': 1.25,
-                      'transform': ax.transAxes, 'solid_capstyle': 'butt'}
-        for y, label, active in zip(ys, labels, actives):
-            t = ax.text(0.25, y, label, transform=ax.transAxes,
-                        horizontalalignment='left',
-                        verticalalignment='center')
-
-            w, h = dy / 2, dy / 2
-            x, y = 0.05, y - h / 2
-
-            p = Rectangle(xy=(x, y), width=w, height=h, edgecolor='black',
-                          facecolor=axcolor, transform=ax.transAxes)
-
-            l1 = Line2D([x, x + w], [y + h, y], **lineparams)
-            l2 = Line2D([x, x + w], [y, y + h], **lineparams)
-
-            l1.set_visible(active)
-            l2.set_visible(active)
-            self.labels.append(t)
-            self.rectangles.append(p)
-            self.lines.append((l1, l2))
-            ax.add_patch(p)
-            ax.add_line(l1)
-            ax.add_line(l2)
+        self._init_props(text_size, **kwargs)
 
         self.connect_event('button_press_event', self._clicked)
+        if self._useblit:
+            self.connect_event('draw_event', self._clear)
 
-        self._observers = cbook.CallbackRegistry()
+        self._observers = cbook.CallbackRegistry(signals=["clicked"])
 
-    def _clicked(self, event):
-        if self.ignore(event) or event.button != 1 or event.inaxes != self.ax:
+    def _init_layout(self, layout, labels, label_props):
+
+        label_props = _expand_text_props(label_props)
+
+        if layout is None:
+            # legacy hard-coded vertical layout
+            self._buttons_xs = [0.15] * len(labels)
+            self._buttons_ys = np.linspace(1, 0, len(labels)+2)[1:-1]
+            self.labels = [
+                self.ax.text(0.25, y, label, transform=self.ax.transAxes,
+                        horizontalalignment="left", verticalalignment="center",
+                        **props)
+                for y, label, props in zip(self._buttons_ys, labels, label_props)]
             return
-        for i, (p, t) in enumerate(zip(self.rectangles, self.labels)):
-            if (t.get_window_extent().contains(event.x, event.y) or
-                    p.get_window_extent().contains(event.x, event.y)):
-                self.set_active(i)
-                break
 
-    def set_active(self, index):
+        # New layout algorithm with text measurement
+        # Parse layout parameter
+        n_labels = len(labels)
+        match layout:
+            case "vertical":
+                n_rows, n_cols = n_labels, 1
+            case "horizontal":
+                n_rows, n_cols = 1, n_labels
+            case (int() as n_rows, int() as n_cols):
+                if n_rows * n_cols < n_labels:
+                    raise ValueError(
+                        f"layout {layout} has {n_rows * n_cols} positions but "
+                        f"{n_labels} labels were provided"
+                    )
+            case _:
+                raise ValueError(
+                    "layout must be None, 'vertical', 'horizontal', or a (rows, cols) "
+                    f"tuple; got {layout!r}")
+
+        # Define spacing in points for DPI-independent sizing
+        fig = self.ax.get_figure(root=False)
+        axes_width_display = 72 * self.ax.bbox.transformed(
+            fig.dpi_scale_trans.inverted()
+        ).width
+        left_margin_display = 11  # points
+        button_text_offset_display = 5.5  # points
+        col_spacing_display = 11  # points
+
+        # Convert to axes coordinates
+        left_margin = left_margin_display / axes_width_display
+        button_text_offset = button_text_offset_display / axes_width_display
+        col_spacing = col_spacing_display / axes_width_display
+
+        # Create text objects to measure widths.
+        # We create Text objects directly rather than using ax.text() since we're
+        # only measuring them and only later add them to the axes.
+        self.labels = [
+            mtext.Text(0, 0, text=label, transform=self.ax.transAxes,
+                       horizontalalignment="left", verticalalignment="center",
+                       **props)
+            for label, props in zip(labels, label_props)
+        ]
+        # Set figure reference so Text objects can access figure properties
+        for text in self.labels:
+            text.set_figure(fig)
+        # Calculate max text width per column (in axes coordinates)
+        renderer = self.ax.figure.canvas.get_renderer()
+        inv_trans = fig.dpi_scale_trans.inverted()
+        col_widths = [
+            max(
+                (
+                    text.get_window_extent(renderer).transformed(inv_trans).width * 72
+                    for text in self.labels[col_idx::n_cols]
+                ),
+                default=0,
+            )
+            / axes_width_display
+            for col_idx in range(n_cols)
+        ]
+
+        # Center rows vertically in the axes
+        ys_per_row = np.linspace(1, 0, n_rows + 2)[1:-1]
+        # Calculate x positions based on text widths
+        col_x_positions = [left_margin]  # First column starts at left margin
+        for col_idx in range(n_cols - 1):
+            col_x_positions.append(
+                col_x_positions[-1] +
+                button_text_offset +
+                col_widths[col_idx] +
+                col_spacing
+            )
+        label_idx = np.arange(n_labels)
+        self._buttons_xs = np.take(col_x_positions, label_idx % n_cols)
+        self._buttons_ys = ys_per_row[label_idx // n_cols]
+        for text, x, y in zip(self.labels, self._buttons_xs, self._buttons_ys):
+            text.set_position((x + button_text_offset, y))
+            self.ax.add_artist(text)
+
+    def _init_props(self, text_size, **kwargs):
+        raise NotImplementedError("This method should be defined in subclasses")
+
+    def _clear(self, event):
+        """Internal event handler to clear the buttons."""
+        if self.ignore(event) or self.canvas.is_saving():
+            return
+        if self._useblit and self.canvas.supports_blit:
+            self._save_blit_background(self.canvas.copy_from_bbox(self.ax.bbox))
+        self.ax.draw_artist(self._buttons)
+
+    def set_label_props(self, props):
         """
-        Toggle (activate or deactivate) a check button by index.
+        Set properties of the `.Text` labels.
 
-        Callbacks will be triggered if :attr:`eventson` is True.
+        .. versionadded:: 3.7
+
+        Parameters
+        ----------
+        props : dict
+            Dictionary of `.Text` properties to be used for the labels. Same
+            format as label_props argument of :class:`RadioButtons` or
+            :class:`CheckButtons`.
+        """
+        _api.check_isinstance(dict, props=props)
+        props = _expand_text_props(props)
+        for text, prop in zip(self.labels, props):
+            text.update(prop)
+
+    @_call_with_reparented_event
+    def _clicked(self, event):
+        if self.ignore(event) or event.button != 1 or not self.ax.contains(event)[0]:
+            return
+        idxs = [  # Indices of frames and of texts that contain the event.
+            *self._buttons.contains(event)[1]["ind"],
+            *[i for i, text in enumerate(self.labels) if text.contains(event)[0]]]
+        if idxs:
+            coords = self._buttons.get_offset_transform().transform(
+                self._buttons.get_offsets())
+            self.set_active(  # Closest index, only looking in idxs.
+                idxs[(((event.x, event.y) - coords[idxs]) ** 2).sum(-1).argmin()])
+
+    def on_clicked(self, func):
+        """
+        Connect the callback function *func* to button click events.
+
+        Parameters
+        ----------
+        func : callable
+            When the button is clicked, call *func* with button label.
+            When all buttons are cleared, call *func* with None.
+            The callback func must have the signature::
+
+                def func(label: str | None) -> Any
+
+            Return values may exist, but are ignored.
+
+        Returns
+        -------
+        A connection id, which can be used to disconnect the callback.
+        """
+        return self._observers.connect('clicked', func)
+
+    def disconnect(self, cid):
+        """Remove the observer with connection id *cid*."""
+        self._observers.disconnect(cid)
+
+
+class CheckButtons(_Buttons):
+    r"""
+    A GUI neutral set of check buttons.
+
+    For the check buttons to remain responsive you must keep a
+    reference to this object.
+
+    Connect to the CheckButtons with the `~._Buttons.on_clicked` method.
+
+    Attributes
+    ----------
+    ax : `~matplotlib.axes.Axes`
+        The parent Axes for the widget.
+    labels : list of `~matplotlib.text.Text`
+        The text label objects of the check buttons.
+    """
+
+    def __init__(self, ax, labels, actives=None, *, layout=None, useblit=True,
+                 label_props=None, frame_props=None, check_props=None):
+        """
+        Add check buttons to `~.axes.Axes` instance *ax*.
+
+        Parameters
+        ----------
+        ax : `~matplotlib.axes.Axes`
+            The parent Axes for the widget.
+        labels : list of str
+            The labels of the check buttons.
+        actives : list of bool, optional
+            The initial check states of the buttons. The list must have the
+            same length as *labels*. If not given, all buttons are unchecked.
+        layout : None or "vertical" or "horizontal" or (int, int), default: None
+            The layout of the check buttons. Options are:
+
+            - ``None``: Use legacy vertical layout (default).
+            - ``"vertical"``: Arrange buttons in a single column with
+              dynamic positioning based on text widths.
+            - ``"horizontal"``: Arrange buttons in a single row with
+              dynamic positioning based on text widths.
+            - ``(rows, cols)`` tuple: Arrange buttons in a grid with the
+              specified number of rows and columns. Buttons are placed
+              left-to-right, top-to-bottom with dynamic positioning.
+
+            The layout options "vertical", "horizontal" and ``(rows, cols)``
+            create ``mtext.Text`` objects to determine exact text sizes, and
+            then they are added to the Axes. This is usually okay, but may cause
+            side-effects and has a slight performance impact. Therefore the
+            default ``None`` value avoids this.
+
+            .. admonition:: Provisional
+                The new layout options are provisional. Their algorithmic
+                behavior, including the exact positions of buttons and labels,
+                may still change without prior warning.
+
+            .. versionadded:: 3.11
+        useblit : bool, default: True
+            Use blitting for faster drawing if supported by the backend.
+            See the tutorial :ref:`blitting` for details.
+
+            .. versionadded:: 3.7
+
+        label_props : dict of lists, optional
+            Dictionary of `.Text` properties to be used for the labels. Each
+            dictionary value should be a list of at least a single element. If
+            the list is of length M, its values are cycled such that the Nth
+            label gets the (N mod M) property.
+
+            .. versionadded:: 3.7
+        frame_props : dict, optional
+            Dictionary of scatter `.Collection` properties to be used for the
+            check button frame. Defaults (label font size / 2)**2 size, black
+            edgecolor, no facecolor, and 1.0 linewidth.
+
+            .. versionadded:: 3.7
+        check_props : dict, optional
+            Dictionary of scatter `.Collection` properties to be used for the
+            check button check. Defaults to (label font size / 2)**2 size,
+            black color, and 1.0 linewidth.
+
+            .. versionadded:: 3.7
+        """
+        _api.check_isinstance((dict, None), label_props=label_props,
+                              frame_props=frame_props, check_props=check_props)
+
+        super().__init__(ax, labels, layout=layout, useblit=useblit,
+                         label_props=label_props, actives=actives,
+                         frame_props=frame_props, check_props=check_props)
+
+    def _init_props(self, text_size, actives, frame_props, check_props):
+        frame_props = {
+            's': text_size**2,
+            'linewidth': 1,
+            **cbook.normalize_kwargs(frame_props, collections.PathCollection),
+            'marker': 's',
+            'transform': self.ax.transAxes,
+        }
+        frame_props.setdefault('facecolor', frame_props.get('color', 'none'))
+        frame_props.setdefault('edgecolor', frame_props.pop('color', 'black'))
+        self._frames = self.ax.scatter(
+            self._buttons_xs,
+            self._buttons_ys,
+            **frame_props,
+        )
+        check_props = {
+            'linewidth': 1,
+            's': text_size**2,
+            **cbook.normalize_kwargs(check_props, collections.PathCollection),
+            'marker': 'x',
+            'transform': self.ax.transAxes,
+            'animated': self._useblit and self.canvas.supports_blit,
+            # TODO: This may need an update when switching out the canvas.
+            #       Can set this to `_useblit` only and live with the animated=True
+            #       overhead on unsupported backends.
+        }
+        check_props.setdefault('facecolor', check_props.pop('color', 'black'))
+        self._buttons = self.ax.scatter(
+            self._buttons_xs,
+            self._buttons_ys,
+            **check_props
+        )
+        if actives is None:
+            actives = [False] * len(self.labels)
+        # The user may have passed custom colours in check_props, so we need to
+        # create the checks (above), and modify the visibility after getting
+        # whatever the user set.
+        self._init_status(actives)
+
+    def set_frame_props(self, props):
+        """
+        Set properties of the check button frames.
+
+        .. versionadded:: 3.7
+
+        Parameters
+        ----------
+        props : dict
+            Dictionary of `.Collection` properties to be used for the check
+            button frames.
+        """
+        _api.check_isinstance(dict, props=props)
+        if 's' in props:  # Keep API consistent with constructor.
+            props['sizes'] = np.broadcast_to(props.pop('s'), len(self.labels))
+        self._frames.update(props)
+
+    def set_check_props(self, props):
+        """
+        Set properties of the check button checks.
+
+        .. versionadded:: 3.7
+
+        Parameters
+        ----------
+        props : dict
+            Dictionary of `.Collection` properties to be used for the check
+            button check.
+        """
+        _api.check_isinstance(dict, props=props)
+        if 's' in props:  # Keep API consistent with constructor.
+            props['sizes'] = np.broadcast_to(props.pop('s'), len(self.labels))
+        actives = self.get_status()
+        self._buttons.update(props)
+        # If new colours are supplied, then we must re-apply the status.
+        self._init_status(actives)
+
+    def set_active(self, index, state=None):
+        """
+        Modify the state of a check button by index.
+
+        Callbacks will be triggered if :attr:`!eventson` is True.
 
         Parameters
         ----------
         index : int
             Index of the check button to toggle.
 
+        state : bool, optional
+            If a boolean value, set the state explicitly. If no value is
+            provided, the state is toggled.
+
         Raises
         ------
         ValueError
             If *index* is invalid.
+        TypeError
+            If *state* is not boolean.
         """
         if index not in range(len(self.labels)):
             raise ValueError(f'Invalid CheckButton index: {index}')
+        _api.check_isinstance((bool, None), state=state)
 
-        l1, l2 = self.lines[index]
-        l1.set_visible(not l1.get_visible())
-        l2.set_visible(not l2.get_visible())
+        invisible = colors.to_rgba('none')
+
+        facecolors = self._buttons.get_facecolor()
+        if state is None:
+            state = colors.same_color(facecolors[index], invisible)
+        facecolors[index] = self._active_check_colors[index] if state else invisible
+        self._buttons.set_facecolor(facecolors)
 
         if self.drawon:
-            self.ax.figure.canvas.draw()
+            if self._useblit and self.canvas.supports_blit:
+                background = self._load_blit_background()
+                if background is not None:
+                    self.canvas.restore_region(background)
+                self.ax.draw_artist(self._buttons)
+                self.canvas.blit(self.ax.bbox)
+            else:
+                self.canvas.draw()
 
         if self.eventson:
             self._observers.process('clicked', self.labels[index].get_text())
 
+    def _init_status(self, actives):
+        """
+        Initialize properties to match active status.
+
+        The user may have passed custom colours in *check_props* to the
+        constructor, or to `.set_check_props`, so we need to modify the
+        visibility after getting whatever the user set.
+        """
+        self._active_check_colors = self._buttons.get_facecolor()
+        if len(self._active_check_colors) == 1:
+            self._active_check_colors = np.repeat(self._active_check_colors,
+                                                  len(actives), axis=0)
+        self._buttons.set_facecolor(
+            [ec if active else "none"
+             for ec, active in zip(self._active_check_colors, actives)])
+
+    def clear(self):
+        """Uncheck all checkboxes."""
+
+        self._buttons.set_facecolor(['none'] * len(self._active_check_colors))
+
+        if hasattr(self, '_lines'):
+            for l1, l2 in self._lines:
+                l1.set_visible(False)
+                l2.set_visible(False)
+
+        if self.drawon:
+            self.canvas.draw()
+
+        if self.eventson:
+            # Call with no label, as all checkboxes are being cleared.
+            self._observers.process('clicked', None)
+
     def get_status(self):
         """
-        Return a tuple of the status (True/False) of all of the check buttons.
+        Return a list of the status (True/False) of all of the check buttons.
         """
-        return [l1.get_visible() for (l1, l2) in self.lines]
+        return [not colors.same_color(color, colors.to_rgba("none"))
+                for color in self._buttons.get_facecolors()]
 
-    def on_clicked(self, func):
-        """
-        Connect the callback function *func* to button click events.
+    def get_checked_labels(self):
+        """Return a list of labels currently checked by user."""
 
-        Returns a connection id, which can be used to disconnect the callback.
-        """
-        return self._observers.connect('clicked', lambda text: func(text))
-
-    def disconnect(self, cid):
-        """Remove the observer with connection id *cid*."""
-        self._observers.disconnect(cid)
+        return [l.get_text() for l, box_checked in
+                zip(self.labels, self.get_status())
+                if box_checked]
 
 
 class TextBox(AxesWidget):
@@ -1101,24 +1503,16 @@ class TextBox(AxesWidget):
     Attributes
     ----------
     ax : `~matplotlib.axes.Axes`
-        The parent axes for the widget.
-    label : `.Text`
+        The parent Axes for the widget.
+    label : `~matplotlib.text.Text`
 
-    color : color
+    color : :mpltype:`color`
         The color of the text box when not hovering.
-    hovercolor : color
+    hovercolor : :mpltype:`color`
         The color of the text box when hovering.
     """
 
-    cnt = _api.deprecated("3.4")(property(  # Not real, but close enough.
-        lambda self: sum(len(d) for d in self._observers.callbacks.values())))
-    change_observers = _api.deprecated("3.4")(property(
-        lambda self: self._observers.callbacks['change']))
-    submit_observers = _api.deprecated("3.4")(property(
-        lambda self: self._observers.callbacks['submit']))
-    DIST_FROM_LEFT = _api.deprecate_privatize_attribute("3.5")
-
-    def __init__(self, ax, label, initial='',
+    def __init__(self, ax, label, initial='', *,
                  color='.95', hovercolor='1', label_pad=.01,
                  textalignment="left"):
         """
@@ -1130,9 +1524,9 @@ class TextBox(AxesWidget):
             Label for this text box.
         initial : str
             Initial value in the text box.
-        color : color
+        color : :mpltype:`color`
             The color of the box.
-        hovercolor : color
+        hovercolor : :mpltype:`color`
             The color of the box when the mouse is over it.
         label_pad : float
             The distance between the label and the right side of the textbox.
@@ -1141,9 +1535,7 @@ class TextBox(AxesWidget):
         """
         super().__init__(ax)
 
-        self._DIST_FROM_LEFT = .05
-
-        self._text_position = _api.check_getitem(
+        self._text_position = _api.getitem_checked(
             {"left": 0.05, "center": 0.5, "right": 0.95},
             textalignment=textalignment)
 
@@ -1157,7 +1549,7 @@ class TextBox(AxesWidget):
             verticalalignment='center', horizontalalignment=textalignment,
             parse_math=False)
 
-        self._observers = cbook.CallbackRegistry()
+        self._observers = cbook.CallbackRegistry(signals=["change", "submit"])
 
         ax.set(
             xlim=(0, 1), ylim=(0, 1),  # s.t. cursor appears from first click.
@@ -1193,8 +1585,9 @@ class TextBox(AxesWidget):
         # This causes a single extra draw if the figure has never been rendered
         # yet, which should be fine as we're going to repeatedly re-render the
         # figure later anyways.
-        if self.ax.figure._cachedRenderer is None:
-            self.ax.figure.canvas.draw()
+        fig = self.ax.get_figure(root=True)
+        if fig._get_renderer() is None:
+            fig.canvas.draw()
 
         text = self.text_disp.get_text()  # Save value before overwriting it.
         widthtext = text[:self.cursor_index]
@@ -1216,8 +1609,9 @@ class TextBox(AxesWidget):
             visible=True)
         self.text_disp.set_text(text)
 
-        self.ax.figure.canvas.draw()
+        fig.canvas.draw()
 
+    @_call_with_reparented_event
     def _release(self, event):
         if self.ignore(event):
             return
@@ -1225,6 +1619,7 @@ class TextBox(AxesWidget):
             return
         event.canvas.release_mouse(self.ax)
 
+    @_call_with_reparented_event
     def _keypress(self, event):
         if self.ignore(event):
             return
@@ -1271,7 +1666,7 @@ class TextBox(AxesWidget):
             self._observers.process('change', self.text)
             self._observers.process('submit', self.text)
 
-    def begin_typing(self, x):
+    def begin_typing(self):
         self.capturekeystrokes = True
         # Disable keypress shortcuts, which may otherwise cause the figure to
         # be saved, closed, etc., until the user stops typing.  The way to
@@ -1279,7 +1674,7 @@ class TextBox(AxesWidget):
         stack = ExitStack()  # Register cleanup actions when user stops typing.
         self._on_stop_typing = stack.close
         toolmanager = getattr(
-            self.ax.figure.canvas.manager, "toolmanager", None)
+            self.ax.get_figure(root=True).canvas.manager, "toolmanager", None)
         if toolmanager is not None:
             # If using toolmanager, lock keypresses, and plan to release the
             # lock when typing stops.
@@ -1301,27 +1696,17 @@ class TextBox(AxesWidget):
             notifysubmit = False
         self.capturekeystrokes = False
         self.cursor.set_visible(False)
-        self.ax.figure.canvas.draw()
+        self.ax.get_figure(root=True).canvas.draw()
         if notifysubmit and self.eventson:
             # Because process() might throw an error in the user's code, only
             # call it once we've already done our cleanup.
             self._observers.process('submit', self.text)
 
-    def position_cursor(self, x):
-        # now, we have to figure out where the cursor goes.
-        # approximate it based on assuming all characters the same length
-        if len(self.text) == 0:
-            self.cursor_index = 0
-        else:
-            bb = self.text_disp.get_window_extent()
-            ratio = np.clip((x - bb.x0) / bb.width, 0, 1)
-            self.cursor_index = int(len(self.text) * ratio)
-        self._rendercursor()
-
+    @_call_with_reparented_event
     def _click(self, event):
         if self.ignore(event):
             return
-        if event.inaxes != self.ax:
+        if not self.ax.contains(event)[0]:
             self.stop_typing()
             return
         if not self.eventson:
@@ -1329,20 +1714,22 @@ class TextBox(AxesWidget):
         if event.canvas.mouse_grabber != self.ax:
             event.canvas.grab_mouse(self.ax)
         if not self.capturekeystrokes:
-            self.begin_typing(event.x)
-        self.position_cursor(event.x)
+            self.begin_typing()
+        self.cursor_index = self.text_disp._char_index_at(event.x)
+        self._rendercursor()
 
     def _resize(self, event):
         self.stop_typing()
 
+    @_call_with_reparented_event
     def _motion(self, event):
         if self.ignore(event):
             return
-        c = self.hovercolor if event.inaxes == self.ax else self.color
+        c = self.hovercolor if self.ax.contains(event)[0] else self.color
         if not colors.same_color(c, self.ax.get_facecolor()):
             self.ax.set_facecolor(c)
             if self.drawon:
-                self.ax.figure.canvas.draw()
+                self.ax.get_figure(root=True).canvas.draw()
 
     def on_text_change(self, func):
         """
@@ -1366,153 +1753,236 @@ class TextBox(AxesWidget):
         self._observers.disconnect(cid)
 
 
-class RadioButtons(AxesWidget):
+class RadioButtons(_Buttons):
     """
     A GUI neutral radio button.
 
     For the buttons to remain responsive you must keep a reference to this
     object.
 
-    Connect to the RadioButtons with the `.on_clicked` method.
+    Connect to the RadioButtons with the `~._Buttons.on_clicked` method.
 
     Attributes
     ----------
     ax : `~matplotlib.axes.Axes`
-        The parent axes for the widget.
-    activecolor : color
+        The parent Axes for the widget.
+    activecolor : :mpltype:`color`
         The color of the selected button.
     labels : list of `.Text`
         The button labels.
-    circles : list of `~.patches.Circle`
-        The buttons.
     value_selected : str
         The label text of the currently selected button.
+    index_selected : int
+        The index of the selected button.
     """
 
-    def __init__(self, ax, labels, active=0, activecolor='blue'):
+    def __init__(self, ax, labels, active=0, activecolor=None, *, layout=None,
+                 useblit=True, label_props=None, radio_props=None):
         """
         Add radio buttons to an `~.axes.Axes`.
 
         Parameters
         ----------
         ax : `~matplotlib.axes.Axes`
-            The axes to add the buttons to.
+            The Axes to add the buttons to.
         labels : list of str
             The button labels.
         active : int
             The index of the initially selected button.
-        activecolor : color
-            The color of the selected button.
+        activecolor : :mpltype:`color`
+            The color of the selected button. The default is ``'blue'`` if not
+            specified here or in *radio_props*.
+        layout : None or "vertical" or "horizontal" or (int, int), default: None
+            The layout of the radio buttons. Options are:
+
+            - ``None``: Use legacy vertical layout (default).
+            - ``"vertical"``: Arrange buttons in a single column with
+              dynamic positioning based on text widths.
+            - ``"horizontal"``: Arrange buttons in a single row with
+              dynamic positioning based on text widths.
+            - ``(rows, cols)`` tuple: Arrange buttons in a grid with the
+              specified number of rows and columns. Buttons are placed
+              left-to-right, top-to-bottom with dynamic positioning.
+
+            The layout options "vertical", "horizontal" and ``(rows, cols)``
+            create ``mtext.Text`` objects to determine exact text sizes, and
+            then they are added to the Axes. This is usually okay, but may cause
+            side-effects and has a slight performance impact. Therefore the
+            default ``None`` value avoids this.
+
+            .. admonition:: Provisional
+                The new layout options are provisional. Their algorithmic
+                behavior, including the exact positions of buttons and labels,
+                may still change without prior warning.
+
+            .. versionadded:: 3.11
+        useblit : bool, default: True
+            Use blitting for faster drawing if supported by the backend.
+            See the tutorial :ref:`blitting` for details.
+
+            .. versionadded:: 3.7
+
+        label_props : dict of lists, optional
+            Dictionary of `.Text` properties to be used for the labels. Each
+            dictionary value should be a list of at least a single element. If
+            the list is of length M, its values are cycled such that the Nth
+            label gets the (N mod M) property.
+
+            .. versionadded:: 3.7
+        radio_props : dict, optional
+            Dictionary of scatter `.Collection` properties to be used for the
+            radio buttons. Defaults to (label font size / 2)**2 size, black
+            edgecolor, and *activecolor* facecolor (when active).
+
+            .. note::
+                If a facecolor is supplied in *radio_props*, it will override
+                *activecolor*. This may be used to provide an active color per
+                button.
+
+            .. versionadded:: 3.7
         """
-        super().__init__(ax)
-        self.activecolor = activecolor
-        self.value_selected = None
+        _api.check_isinstance((dict, None), label_props=label_props,
+                              radio_props=radio_props)
 
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_navigate(False)
-        dy = 1. / (len(labels) + 1)
-        ys = np.linspace(1 - dy, dy, len(labels))
-        cnt = 0
-        axcolor = ax.get_facecolor()
+        radio_props = cbook.normalize_kwargs(radio_props,
+                                             collections.PathCollection)
+        if activecolor is not None:
+            if 'facecolor' in radio_props:
+                _api.warn_external(
+                    'Both the *activecolor* parameter and the *facecolor* '
+                    'key in the *radio_props* parameter has been specified. '
+                    '*activecolor* will be ignored.')
+        else:
+            activecolor = 'blue'  # Default.
+        super().__init__(ax, labels, useblit=useblit, label_props=label_props,
+                         active=active, layout=layout, activecolor=activecolor,
+                         radio_props=radio_props)
 
-        # scale the radius of the circle with the spacing between each one
-        circle_radius = dy / 2 - 0.01
-        # default to hard-coded value if the radius becomes too large
-        circle_radius = min(circle_radius, 0.05)
+        self._activecolor = activecolor
+        self._initial_active = active
+        self.value_selected = labels[active]
+        self.index_selected = active
 
-        self.labels = []
-        self.circles = []
-        for y, label in zip(ys, labels):
-            t = ax.text(0.25, y, label, transform=ax.transAxes,
-                        horizontalalignment='left',
-                        verticalalignment='center')
+    def _init_props(self, text_size, active, activecolor, radio_props):
+        radio_props = {
+            's': text_size**2,
+            **radio_props,
+            'marker': 'o',
+            'transform': self.ax.transAxes,
+            'animated': self._useblit and self.canvas.supports_blit,
+            # TODO: This may need an update when switching out the canvas.
+            #       Can set this to `_useblit` only and live with the animated=True
+            #       overhead on unsupported backends.
 
-            if cnt == active:
-                self.value_selected = label
-                facecolor = activecolor
-            else:
-                facecolor = axcolor
+        }
+        radio_props.setdefault('edgecolor', radio_props.get('color', 'black'))
+        radio_props.setdefault('facecolor',
+                               radio_props.pop('color', activecolor))
+        self._buttons = self.ax.scatter(
+            self._buttons_xs,
+            self._buttons_ys,
+            **radio_props,
+        )
+        # The user may have passed custom colours in radio_props, so we need to
+        # create the radios, and modify the visibility after getting whatever
+        # the user set.
+        self._active_colors = self._buttons.get_facecolor()
+        if len(self._active_colors) == 1:
+            self._active_colors = np.repeat(self._active_colors, len(self.labels),
+                                            axis=0)
+        self._buttons.set_facecolor(
+            [activecolor if i == active else "none"
+             for i, activecolor in enumerate(self._active_colors)])
 
-            p = Circle(xy=(0.15, y), radius=circle_radius, edgecolor='black',
-                       facecolor=facecolor, transform=ax.transAxes)
+    def set_radio_props(self, props):
+        """
+        Set properties of the `.Text` labels.
 
-            self.labels.append(t)
-            self.circles.append(p)
-            ax.add_patch(p)
-            cnt += 1
+        .. versionadded:: 3.7
 
-        self.connect_event('button_press_event', self._clicked)
+        Parameters
+        ----------
+        props : dict
+            Dictionary of `.Collection` properties to be used for the radio
+            buttons.
+        """
+        _api.check_isinstance(dict, props=props)
+        if 's' in props:  # Keep API consistent with constructor.
+            props['sizes'] = np.broadcast_to(props.pop('s'), len(self.labels))
+        self._buttons.update(props)
+        self._active_colors = self._buttons.get_facecolor()
+        if len(self._active_colors) == 1:
+            self._active_colors = np.repeat(self._active_colors,
+                                            len(self.labels), axis=0)
+        self._buttons.set_facecolor(
+            [activecolor if text.get_text() == self.value_selected else "none"
+             for text, activecolor in zip(self.labels, self._active_colors)])
 
-        self._observers = cbook.CallbackRegistry()
+    @property
+    def activecolor(self):
+        return self._activecolor
 
-    cnt = _api.deprecated("3.4")(property(  # Not real, but close enough.
-        lambda self: len(self._observers.callbacks['clicked'])))
-    observers = _api.deprecated("3.4")(property(
-        lambda self: self._observers.callbacks['clicked']))
-
-    def _clicked(self, event):
-        if self.ignore(event) or event.button != 1 or event.inaxes != self.ax:
-            return
-        pclicked = self.ax.transAxes.inverted().transform((event.x, event.y))
-        distances = {}
-        for i, (p, t) in enumerate(zip(self.circles, self.labels)):
-            if (t.get_window_extent().contains(event.x, event.y)
-                    or np.linalg.norm(pclicked - p.center) < p.radius):
-                distances[i] = np.linalg.norm(pclicked - p.center)
-        if len(distances) > 0:
-            closest = min(distances, key=distances.get)
-            self.set_active(closest)
+    @activecolor.setter
+    def activecolor(self, activecolor):
+        colors._check_color_like(activecolor=activecolor)
+        self._activecolor = activecolor
+        self.set_radio_props({'facecolor': activecolor})
 
     def set_active(self, index):
         """
         Select button with number *index*.
 
-        Callbacks will be triggered if :attr:`eventson` is True.
+        Callbacks will be triggered if :attr:`!eventson` is True.
+
+        Parameters
+        ----------
+        index : int
+            The index of the button to activate.
+
+        Raises
+        ------
+        ValueError
+            If the index is invalid.
         """
         if index not in range(len(self.labels)):
             raise ValueError(f'Invalid RadioButton index: {index}')
-
         self.value_selected = self.labels[index].get_text()
-
-        for i, p in enumerate(self.circles):
-            if i == index:
-                color = self.activecolor
-            else:
-                color = self.ax.get_facecolor()
-            p.set_facecolor(color)
+        self.index_selected = index
+        button_facecolors = self._buttons.get_facecolor()
+        button_facecolors[:] = colors.to_rgba("none")
+        button_facecolors[index] = colors.to_rgba(self._active_colors[index])
+        self._buttons.set_facecolor(button_facecolors)
 
         if self.drawon:
-            self.ax.figure.canvas.draw()
+            if self._useblit and self.canvas.supports_blit:
+                background = self._load_blit_background()
+                if background is not None:
+                    self.canvas.restore_region(background)
+                self.ax.draw_artist(self._buttons)
+                self.canvas.blit(self.ax.bbox)
+            else:
+                self.canvas.draw()
 
         if self.eventson:
             self._observers.process('clicked', self.labels[index].get_text())
 
-    def on_clicked(self, func):
-        """
-        Connect the callback function *func* to button click events.
-
-        Returns a connection id, which can be used to disconnect the callback.
-        """
-        return self._observers.connect('clicked', func)
-
-    def disconnect(self, cid):
-        """Remove the observer with connection id *cid*."""
-        self._observers.disconnect(cid)
+    def clear(self):
+        """Reset the active button to the initially active one."""
+        self.set_active(self._initial_active)
 
 
 class SubplotTool(Widget):
     """
-    A tool to adjust the subplot params of a `matplotlib.figure.Figure`.
+    A tool to adjust the subplot params of a `.Figure`.
     """
 
     def __init__(self, targetfig, toolfig):
         """
         Parameters
         ----------
-        targetfig : `.Figure`
+        targetfig : `~matplotlib.figure.Figure`
             The figure instance to adjust.
-        toolfig : `.Figure`
+        toolfig : `~matplotlib.figure.Figure`
             The figure instance to embed the subplot tool into.
         """
 
@@ -1526,8 +1996,8 @@ class SubplotTool(Widget):
         # The last subplot, removed below, keeps space for the "Reset" button.
         for name, ax in zip(names, toolfig.subplots(len(names) + 1)):
             ax.set_navigate(False)
-            slider = Slider(ax, name,
-                            0, 1, getattr(targetfig.subplotpars, name))
+            slider = Slider(ax, name, 0, 1,
+                            valinit=getattr(targetfig.subplotpars, name))
             slider.on_changed(self._on_slider_changed)
             self._sliders.append(slider)
         toolfig.axes[-1].remove()
@@ -1545,7 +2015,7 @@ class SubplotTool(Widget):
         self.sliderbottom.slidermax = self.slidertop
         self.slidertop.slidermin = self.sliderbottom
 
-        bax = toolfig.add_axes([0.8, 0.05, 0.15, 0.075])
+        bax = toolfig.add_axes((0.8, 0.05, 0.15, 0.075))
         self.buttonreset = Button(bax, 'Reset')
         self.buttonreset.on_clicked(self._on_reset)
 
@@ -1575,13 +2045,13 @@ class SubplotTool(Widget):
 
 class Cursor(AxesWidget):
     """
-    A crosshair cursor that spans the axes and moves with mouse cursor.
+    A crosshair cursor that spans the Axes and moves with mouse cursor.
 
     For the cursor to remain responsive you must keep a reference to it.
 
     Parameters
     ----------
-    ax : `matplotlib.axes.Axes`
+    ax : `~matplotlib.axes.Axes`
         The `~.axes.Axes` to attach the cursor to.
     horizOn : bool, default: True
         Whether to draw the horizontal line.
@@ -1589,7 +2059,7 @@ class Cursor(AxesWidget):
         Whether to draw the vertical line.
     useblit : bool, default: False
         Use blitting for faster drawing if supported by the backend.
-        See the tutorial :doc:`/tutorials/advanced/blitting` for details.
+        See the tutorial :ref:`blitting` for details.
 
     Other Parameters
     ----------------
@@ -1601,8 +2071,7 @@ class Cursor(AxesWidget):
     --------
     See :doc:`/gallery/widgets/cursor`.
     """
-
-    def __init__(self, ax, horizOn=True, vertOn=True, useblit=False,
+    def __init__(self, ax, *, horizOn=True, vertOn=True, useblit=False,
                  **lineprops):
         super().__init__(ax)
 
@@ -1612,86 +2081,101 @@ class Cursor(AxesWidget):
         self.visible = True
         self.horizOn = horizOn
         self.vertOn = vertOn
-        self.useblit = useblit and self.canvas.supports_blit
+        self.useblit = useblit and self.canvas.supports_blit  # TODO: make dynamic
+
+        if self.useblit:
+            for ax_ in ax.get_figure(root=True).get_axes():
+                if ax_ is not ax and ax.bbox.overlaps(ax_.bbox):
+                    _api.warn_external(
+                        "Cursor blitting is currently not supported on "
+                        "overlapping axes; falling back to useblit=False."
+                    )
+                    self.useblit = False
+                    break
 
         if self.useblit:
             lineprops['animated'] = True
         self.lineh = ax.axhline(ax.get_ybound()[0], visible=False, **lineprops)
         self.linev = ax.axvline(ax.get_xbound()[0], visible=False, **lineprops)
 
-        self.background = None
         self.needclear = False
 
     def clear(self, event):
         """Internal event handler to clear the cursor."""
-        if self.ignore(event):
+        if self.ignore(event) or self.canvas.is_saving():
             return
         if self.useblit:
-            self.background = self.canvas.copy_from_bbox(self.ax.bbox)
-        self.linev.set_visible(False)
-        self.lineh.set_visible(False)
+            self._save_blit_background(self.canvas.copy_from_bbox(self.ax.bbox))
 
+    @_call_with_reparented_event
     def onmove(self, event):
         """Internal event handler to draw the cursor when the mouse moves."""
         if self.ignore(event):
             return
         if not self.canvas.widgetlock.available(self):
             return
-        if event.inaxes != self.ax:
+        if not self.ax.contains(event)[0]:
             self.linev.set_visible(False)
             self.lineh.set_visible(False)
-
             if self.needclear:
-                self.canvas.draw()
+                background = self._load_blit_background()
+                if self.useblit and background is not None:
+                    self.canvas.restore_region(background)
+                    self.canvas.blit(self.ax.bbox)
+                else:
+                    self.canvas.draw()
                 self.needclear = False
             return
         self.needclear = True
-        if not self.visible:
-            return
         self.linev.set_xdata((event.xdata, event.xdata))
-
-        self.lineh.set_ydata((event.ydata, event.ydata))
         self.linev.set_visible(self.visible and self.vertOn)
+        self.lineh.set_ydata((event.ydata, event.ydata))
         self.lineh.set_visible(self.visible and self.horizOn)
-
-        self._update()
-
-    def _update(self):
+        if not (self.visible and (self.vertOn or self.horizOn)):
+            return
+        # Redraw.
         if self.useblit:
-            if self.background is not None:
-                self.canvas.restore_region(self.background)
+            background = self._load_blit_background()
+            if background is not None:
+                self.canvas.restore_region(background)
             self.ax.draw_artist(self.linev)
             self.ax.draw_artist(self.lineh)
             self.canvas.blit(self.ax.bbox)
         else:
             self.canvas.draw_idle()
-        return False
 
 
 class MultiCursor(Widget):
     """
     Provide a vertical (default) and/or horizontal line cursor shared between
-    multiple axes.
+    multiple Axes.
+
+    Call signatures::
+
+        MultiCursor(axes, *, ...)
+        MultiCursor(canvas, axes, *, ...)  # deprecated
 
     For the cursor to remain responsive you must keep a reference to it.
 
     Parameters
     ----------
-    canvas : `matplotlib.backend_bases.FigureCanvasBase`
-        The FigureCanvas that contains all the axes.
+    canvas : object
+        This parameter is entirely unused.
 
-    axes : list of `matplotlib.axes.Axes`
+        .. deprecated:: 3.11
+
+    axes : list of `~matplotlib.axes.Axes`
         The `~.axes.Axes` to attach the cursor to.
 
     useblit : bool, default: True
         Use blitting for faster drawing if supported by the backend.
-        See the tutorial :doc:`/tutorials/advanced/blitting`
+        See the tutorial :ref:`blitting`
         for details.
 
     horizOn : bool, default: False
         Whether to draw the horizontal line.
 
-    vertOn: bool, default: True
+    vertOn : bool, default: True
         Whether to draw the vertical line.
 
     Other Parameters
@@ -1705,12 +2189,33 @@ class MultiCursor(Widget):
     See :doc:`/gallery/widgets/multicursor`.
     """
 
-    def __init__(self, canvas, axes, useblit=True, horizOn=False, vertOn=True,
+    def __init__(self, *args, useblit=True, horizOn=False, vertOn=True,
                  **lineprops):
-        self.canvas = canvas
+        # Deprecation of canvas as the first attribute. When the deprecation expires:
+        # - change the signature to __init__(self, axes, *, ...)
+        # - delete the "Call signatures" block in the docstring
+        # - delete this block
+        kwargs = {k: lineprops.pop(k)
+                  for k in list(lineprops) if k in ("canvas", "axes")}
+        params = _api.select_matching_signature(
+            [lambda axes: locals(), lambda canvas, axes: locals()], *args, **kwargs)
+        if "canvas" in params:
+            _api.warn_deprecated(
+                "3.11",
+                message="The canvas parameter in MultiCursor is unused and deprecated "
+                "since %(since)s. Please remove it and call MultiCursor(axes) "
+                "instead of MultiCursor(canvas, axes). The latter will start raising "
+                "an error in %(removal)s"
+            )
+        axes = params["axes"]
+
         self.axes = axes
         self.horizOn = horizOn
         self.vertOn = vertOn
+
+        self._canvas_infos = {
+            ax.get_figure(root=True).canvas:
+                {"cids": [], "background": None} for ax in axes}
 
         xmin, xmax = axes[-1].get_xlim()
         ymin, ymax = axes[-1].get_ylim()
@@ -1718,92 +2223,104 @@ class MultiCursor(Widget):
         ymid = 0.5 * (ymin + ymax)
 
         self.visible = True
-        self.useblit = useblit and self.canvas.supports_blit
-        self.background = None
-        self.needclear = False
+        self.useblit = (  # TODO: make dynamic
+            useblit
+            and all(canvas.supports_blit for canvas in self._canvas_infos))
 
         if self.useblit:
             lineprops['animated'] = True
 
-        if vertOn:
-            self.vlines = [ax.axvline(xmid, visible=False, **lineprops)
-                           for ax in axes]
-        else:
-            self.vlines = []
-
-        if horizOn:
-            self.hlines = [ax.axhline(ymid, visible=False, **lineprops)
-                           for ax in axes]
-        else:
-            self.hlines = []
+        self.vlines = [ax.axvline(xmid, visible=False, **lineprops)
+                       for ax in axes]
+        self.hlines = [ax.axhline(ymid, visible=False, **lineprops)
+                       for ax in axes]
 
         self.connect()
 
     def connect(self):
         """Connect events."""
-        self._cidmotion = self.canvas.mpl_connect('motion_notify_event',
-                                                  self.onmove)
-        self._ciddraw = self.canvas.mpl_connect('draw_event', self.clear)
+        for canvas, info in self._canvas_infos.items():
+            info["cids"] = [
+                canvas.mpl_connect('motion_notify_event', self.onmove),
+                canvas.mpl_connect('draw_event', self.clear),
+            ]
 
     def disconnect(self):
         """Disconnect events."""
-        self.canvas.mpl_disconnect(self._cidmotion)
-        self.canvas.mpl_disconnect(self._ciddraw)
+        for canvas, info in self._canvas_infos.items():
+            for cid in info["cids"]:
+                canvas.mpl_disconnect(cid)
+            info["cids"].clear()
 
     def clear(self, event):
         """Clear the cursor."""
         if self.ignore(event):
             return
         if self.useblit:
-            self.background = (
-                self.canvas.copy_from_bbox(self.canvas.figure.bbox))
-        for line in self.vlines + self.hlines:
-            line.set_visible(False)
+            for canvas, info in self._canvas_infos.items():
+                # someone has switched the canvas on us!  This happens if
+                # `savefig` needs to save to a format the previous backend did
+                # not support (e.g. saving a figure using an Agg based backend
+                # saved to a vector format).
+                if canvas is not canvas.figure.canvas:
+                    continue
+                info["background"] = canvas.copy_from_bbox(canvas.figure.bbox)
 
     def onmove(self, event):
-        if self.ignore(event):
+        axs = [ax for ax in self.axes if ax.contains(event)[0]]
+        if self.ignore(event) or not axs or not event.canvas.widgetlock.available(self):
             return
-        if event.inaxes not in self.axes:
+        ax = cbook._topmost_artist(axs)
+        xdata, ydata = ((event.xdata, event.ydata) if event.inaxes is ax
+                        else ax.transData.inverted().transform((event.x, event.y)))
+        for line in self.vlines:
+            line.set_xdata((xdata, xdata))
+            line.set_visible(self.visible and self.vertOn)
+        for line in self.hlines:
+            line.set_ydata((ydata, ydata))
+            line.set_visible(self.visible and self.horizOn)
+        if not (self.visible and (self.vertOn or self.horizOn)):
             return
-        if not self.canvas.widgetlock.available(self):
-            return
-        self.needclear = True
-        if not self.visible:
-            return
-        if self.vertOn:
-            for line in self.vlines:
-                line.set_xdata((event.xdata, event.xdata))
-                line.set_visible(self.visible)
-        if self.horizOn:
-            for line in self.hlines:
-                line.set_ydata((event.ydata, event.ydata))
-                line.set_visible(self.visible)
-        self._update()
-
-    def _update(self):
+        # Redraw.
         if self.useblit:
-            if self.background is not None:
-                self.canvas.restore_region(self.background)
+            for canvas, info in self._canvas_infos.items():
+                if info["background"]:
+                    canvas.restore_region(info["background"])
             if self.vertOn:
                 for ax, line in zip(self.axes, self.vlines):
                     ax.draw_artist(line)
             if self.horizOn:
                 for ax, line in zip(self.axes, self.hlines):
                     ax.draw_artist(line)
-            self.canvas.blit()
+            for canvas in self._canvas_infos:
+                canvas.blit()
         else:
-            self.canvas.draw_idle()
+            for canvas in self._canvas_infos:
+                canvas.draw_idle()
 
 
 class _SelectorWidget(AxesWidget):
+    """
+    The base class for selector widgets.
 
-    def __init__(self, ax, onselect, useblit=False, button=None,
+    This class provides common functionality for selector widgets,
+    such as handling mouse and keyboard events, managing state modifier keys, etc.
+
+    The class itself is private and may be changed or removed without prior warning.
+    However, the public API it provides to subclasses is stable and considered
+    public on the subclasses.
+    """
+
+    def __init__(self, ax, onselect=None, useblit=False, button=None,
                  state_modifier_keys=None, use_data_coordinates=False):
         super().__init__(ax)
 
-        self.visible = True
-        self.onselect = onselect
-        self.useblit = useblit and self.canvas.supports_blit
+        self._visible = True
+        if onselect is None:
+            self.onselect = lambda *args: None
+        else:
+            self.onselect = onselect
+        self._useblit = useblit
         self.connect_default_events()
 
         self._state_modifier_keys = dict(move=' ', clear='escape',
@@ -1811,8 +2328,6 @@ class _SelectorWidget(AxesWidget):
                                          rotate='r')
         self._state_modifier_keys.update(state_modifier_keys or {})
         self._use_data_coordinates = use_data_coordinates
-
-        self.background = None
 
         if isinstance(button, Integral):
             self.validButtons = [button]
@@ -1829,10 +2344,10 @@ class _SelectorWidget(AxesWidget):
         self._prev_event = None
         self._state = set()
 
-    eventpress = _api.deprecate_privatize_attribute("3.5")
-    eventrelease = _api.deprecate_privatize_attribute("3.5")
-    state = _api.deprecate_privatize_attribute("3.5")
-    state_modifier_keys = _api.deprecate_privatize_attribute("3.6")
+    @property
+    def useblit(self):
+        """Return whether blitting is used (requested and supported by canvas)."""
+        return self._useblit and self.canvas.supports_blit
 
     def set_active(self, active):
         super().set_active(active)
@@ -1857,6 +2372,8 @@ class _SelectorWidget(AxesWidget):
         # `release` can call a draw event even when `ignore` is True.
         if not self.useblit:
             return
+        if self.canvas.is_saving():
+            return  # saving does not use blitting
         # Make sure that widget artists don't get accidentally included in the
         # background, by re-rendering the background if needed (and then
         # re-re-rendering the canvas with the visible widget artists).
@@ -1872,7 +2389,7 @@ class _SelectorWidget(AxesWidget):
                 for artist in artists:
                     stack.enter_context(artist._cm_set(visible=False))
                 self.canvas.draw()
-            self.background = self.canvas.copy_from_bbox(self.ax.bbox)
+            self._save_blit_background(self.canvas.copy_from_bbox(self.ax.bbox))
         if needs_redraw:
             for artist in artists:
                 self.ax.draw_artist(artist)
@@ -1889,7 +2406,9 @@ class _SelectorWidget(AxesWidget):
 
     def ignore(self, event):
         # docstring inherited
-        if not self.active or not self.ax.get_visible():
+        if super().ignore(event):
+            return True
+        if not self.ax.get_visible():
             return True
         # If canvas was locked
         if not self.canvas.widgetlock.available(self):
@@ -1901,24 +2420,25 @@ class _SelectorWidget(AxesWidget):
         if (self.validButtons is not None
                 and event.button not in self.validButtons):
             return True
-        # If no button was pressed yet ignore the event if it was out
-        # of the axes
+        # If no button was pressed yet ignore the event if it was out of the Axes.
         if self._eventpress is None:
-            return event.inaxes != self.ax
+            return not self.ax.contains(event)[0]
         # If a button was pressed, check if the release-button is the same.
         if event.button == self._eventpress.button:
             return False
         # If a button was pressed, check if the release-button is the same.
-        return (event.inaxes != self.ax or
+        return (not self.ax.contains(event)[0] or
                 event.button != self._eventpress.button)
 
     def update(self):
         """Draw using blit() or draw_idle(), depending on ``self.useblit``."""
-        if not self.ax.get_visible() or self.ax.figure._cachedRenderer is None:
-            return False
+        if (not self.ax.get_visible() or
+                self.ax.get_figure(root=True)._get_renderer() is None):
+            return
         if self.useblit:
-            if self.background is not None:
-                self.canvas.restore_region(self.background)
+            background = self._load_blit_background()
+            if background is not None:
+                self.canvas.restore_region(background)
             else:
                 self.update_background(None)
             # We need to draw all artists, which are not included in the
@@ -1931,7 +2451,6 @@ class _SelectorWidget(AxesWidget):
             self.canvas.blit(self.ax.bbox)
         else:
             self.canvas.draw_idle()
-        return False
 
     def _get_data(self, event):
         """Get the xdata and ydata for event, with limits."""
@@ -1946,7 +2465,8 @@ class _SelectorWidget(AxesWidget):
         Preprocess an event:
 
         - Replace *event* by the previous event if *event* has no ``xdata``.
-        - Clip ``xdata`` and ``ydata`` to the axes limits.
+        - Get ``xdata`` and ``ydata`` from this widget's Axes, and clip them to the axes
+          limits.
         - Update the previous event.
         """
         if event.xdata is None:
@@ -1957,6 +2477,7 @@ class _SelectorWidget(AxesWidget):
         self._prev_event = event
         return event
 
+    @_call_with_reparented_event
     def press(self, event):
         """Button press handler and validator."""
         if not self.ignore(event):
@@ -1975,6 +2496,7 @@ class _SelectorWidget(AxesWidget):
     def _press(self, event):
         """Button press event handler."""
 
+    @_call_with_reparented_event
     def release(self, event):
         """Button release event handler and validator."""
         if not self.ignore(event) and self._eventpress:
@@ -1990,6 +2512,7 @@ class _SelectorWidget(AxesWidget):
     def _release(self, event):
         """Button release event handler."""
 
+    @_call_with_reparented_event
     def onmove(self, event):
         """Cursor move event handler and validator."""
         if not self.ignore(event) and self._eventpress:
@@ -2001,6 +2524,7 @@ class _SelectorWidget(AxesWidget):
     def _onmove(self, event):
         """Cursor move event handler."""
 
+    @_call_with_reparented_event
     def on_scroll(self, event):
         """Mouse scroll event handler and validator."""
         if not self.ignore(event):
@@ -2009,6 +2533,7 @@ class _SelectorWidget(AxesWidget):
     def _on_scroll(self, event):
         """Mouse scroll event handler."""
 
+    @_call_with_reparented_event
     def on_key_press(self, event):
         """Key press event handler and validator for all selection widgets."""
         if self.active:
@@ -2033,6 +2558,7 @@ class _SelectorWidget(AxesWidget):
     def _on_key_press(self, event):
         """Key press event handler - for widget-specific key press actions."""
 
+    @_call_with_reparented_event
     def on_key_release(self, event):
         """Key release event handler and validator."""
         if self.active:
@@ -2048,16 +2574,23 @@ class _SelectorWidget(AxesWidget):
         """Key release event handler."""
 
     def set_visible(self, visible):
-        """Set the visibility of our artists."""
-        self.visible = visible
+        """Set the visibility of the selector artists."""
+        self._visible = visible
         for artist in self.artists:
             artist.set_visible(visible)
 
+    def get_visible(self):
+        """Get the visibility of the selector artists."""
+        return self._visible
+
     def clear(self):
         """Clear the selection and set the selector ready to make a new one."""
+        self._clear_without_update()
+        self.update()
+
+    def _clear_without_update(self):
         self._selection_completed = False
         self.set_visible(False)
-        self.update()
 
     @property
     def artists(self):
@@ -2067,20 +2600,21 @@ class _SelectorWidget(AxesWidget):
 
     def set_props(self, **props):
         """
-        Set the properties of the selector artist. See the `props` argument
-        in the selector docstring to know which properties are supported.
+        Set the properties of the selector artist.
+
+        See the *props* argument in the selector docstring to know which properties are
+        supported.
         """
         artist = self._selection_artist
         props = cbook.normalize_kwargs(props, artist)
         artist.set(**props)
         if self.useblit:
             self.update()
-        self._props.update(props)
 
     def set_handle_props(self, **handle_props):
         """
         Set the properties of the handles selector artist. See the
-        `handle_props` argument in the selector docstring to know which
+        *handle_props* argument in the selector docstring to know which
         properties are supported.
         """
         if not hasattr(self, '_handles_artists'):
@@ -2104,13 +2638,15 @@ class _SelectorWidget(AxesWidget):
     def add_state(self, state):
         """
         Add a state to define the widget's behavior. See the
-        `state_modifier_keys` parameters for details.
+        *state_modifier_keys* parameter in the constructor of the concrete
+        selector class for details.
 
         Parameters
         ----------
         state : str
             Must be a supported state of the selector. See the
-            `state_modifier_keys` parameters for details.
+            *state_modifier_keys* parameter in the constructor of the concrete
+            selector class for details.
 
         Raises
         ------
@@ -2124,13 +2660,15 @@ class _SelectorWidget(AxesWidget):
     def remove_state(self, state):
         """
         Remove a state to define the widget's behavior. See the
-        `state_modifier_keys` parameters for details.
+        *state_modifier_keys* parameter in the constructor of the concrete
+        selector class for details.
 
         Parameters
         ----------
-        value : str
+        state : str
             Must be a supported state of the selector. See the
-            `state_modifier_keys` parameters for details.
+            *state_modifier_keys* parameter in the constructor of the concrete
+            selector class for details.
 
         Raises
         ------
@@ -2158,14 +2696,11 @@ class SpanSelector(_SelectorWidget):
 
     Parameters
     ----------
-    ax : `matplotlib.axes.Axes`
+    ax : `~matplotlib.axes.Axes`
 
-    onselect : callable
+    onselect : callable with signature ``func(min: float, max: float)``
         A callback function that is called after a release event and the
         selection is created, changed or removed.
-        It must have the signature::
-
-            def on_select(min: float, max: float) -> Any
 
     direction : {"horizontal", "vertical"}
         The direction along which to draw the span selector.
@@ -2176,21 +2711,13 @@ class SpanSelector(_SelectorWidget):
 
     useblit : bool, default: False
         If True, use the backend-dependent blitting features for faster
-        canvas updates. See the tutorial :doc:`/tutorials/advanced/blitting`
-        for details.
+        canvas updates. See the tutorial :ref:`blitting` for details.
 
-    props : dict, optional
-        Dictionary of `matplotlib.patches.Patch` properties.
-        Default:
+    props : dict, default: {'facecolor': 'red', 'alpha': 0.5}
+        Dictionary of `.Patch` properties.
 
-            ``dict(facecolor='red', alpha=0.5)``
-
-    onmove_callback : func(min, max), min/max are floats, default: None
+    onmove_callback : callable with signature ``func(min: float, max: float)``, optional
         Called on mouse move while the span is being selected.
-
-    span_stays : bool, default: False
-        If True, the span stays visible after the mouse is released.
-        Deprecated, use *interactive* instead.
 
     interactive : bool, default: False
         Whether to draw a set of handles that allow interaction with the
@@ -2201,12 +2728,10 @@ class SpanSelector(_SelectorWidget):
 
     handle_props : dict, default: None
         Properties of the handle lines at the edges of the span. Only used
-        when *interactive* is True. See `matplotlib.lines.Line2D` for valid
-        properties.
+        when *interactive* is True. See `.Line2D` for valid properties.
 
     grab_range : float, default: 10
-        Distance in pixels within which the interactive tool handles can be
-        activated.
+        Distance in pixels within which the interactive tool handles can be activated.
 
     state_modifier_keys : dict, optional
         Keyboard modifiers which affect the widget's behavior.  Values
@@ -2215,12 +2740,13 @@ class SpanSelector(_SelectorWidget):
         - "clear": Clear the current shape, default: "escape".
 
     drag_from_anywhere : bool, default: False
-        If `True`, the widget can be moved by clicking anywhere within
-        its bounds.
+        If `True`, the widget can be moved by clicking anywhere within its bounds.
 
     ignore_event_outside : bool, default: False
-        If `True`, the event triggered outside the span selector will be
-        ignored.
+        If `True`, the event triggered outside the span selector will be ignored.
+
+    snap_values : 1D array-like, optional
+        Snap the selector edges to the given values.
 
     Examples
     --------
@@ -2237,13 +2763,11 @@ class SpanSelector(_SelectorWidget):
     See also: :doc:`/gallery/widgets/span_selector`
     """
 
-    @_api.rename_parameter("3.5", "rectprops", "props")
-    @_api.rename_parameter("3.5", "span_stays", "interactive")
-    def __init__(self, ax, onselect, direction, minspan=0, useblit=False,
+    def __init__(self, ax, onselect, direction, *, minspan=0, useblit=False,
                  props=None, onmove_callback=None, interactive=False,
                  button=None, handle_props=None, grab_range=10,
                  state_modifier_keys=None, drag_from_anywhere=False,
-                 ignore_event_outside=False):
+                 ignore_event_outside=False, snap_values=None):
 
         if state_modifier_keys is None:
             state_modifier_keys = dict(clear='escape',
@@ -2256,18 +2780,19 @@ class SpanSelector(_SelectorWidget):
         if props is None:
             props = dict(facecolor='red', alpha=0.5)
 
-        props['animated'] = self.useblit
+        # Note: We set this based on the user setting during ínitialization,
+        #       not on the actual capability of blitting. But the value is
+        #       irrelevant if the backend does not support blitting, so that
+        #       we don't have to dynamically update this on the backend.
+        #       This relies on the current behavior that the request for
+        #       useblit is fixed during initialization and cannot be changed
+        #       afterwards.
+        props['animated'] = self._useblit
 
         self.direction = direction
-
-        self.visible = True
         self._extents_on_press = None
+        self.snap_values = snap_values
 
-        # self._pressv is deprecated and we don't use it internally anymore
-        # but we maintain it until it is removed
-        self._pressv = None
-
-        self._props = props
         self.onmove_callback = onmove_callback
         self.minspan = minspan
 
@@ -2277,9 +2802,7 @@ class SpanSelector(_SelectorWidget):
         self.drag_from_anywhere = drag_from_anywhere
         self.ignore_event_outside = ignore_event_outside
 
-        # Reset canvas so that `new_axes` connects events.
-        self.canvas = None
-        self.new_axes(ax)
+        self.new_axes(ax, _props=props, _init=True)
 
         # Setup handles
         self._handle_props = {
@@ -2292,35 +2815,15 @@ class SpanSelector(_SelectorWidget):
 
         self._active_handle = None
 
-        # prev attribute is deprecated but we still need to maintain it
-        self._prev = (0, 0)
-
-    rect = _api.deprecated("3.5")(
-        property(lambda self: self._selection_artist)
-        )
-
-    rectprops = _api.deprecated("3.5")(
-        property(lambda self: self._props)
-        )
-
-    active_handle = _api.deprecate_privatize_attribute("3.5")
-
-    pressv = _api.deprecate_privatize_attribute("3.5")
-
-    span_stays = _api.deprecated("3.5")(
-        property(lambda self: self._interactive)
-        )
-
-    prev = _api.deprecate_privatize_attribute("3.5")
-
-    def new_axes(self, ax):
+    def new_axes(self, ax, *, _props=None, _init=False):
         """Set SpanSelector to operate on a new Axes."""
-        self.ax = ax
-        if self.canvas is not ax.figure.canvas:
+        reconnect = False
+        if _init or self.canvas is not ax.get_figure(root=True).canvas:
             if self.canvas is not None:
                 self.disconnect_events()
-
-            self.canvas = ax.figure.canvas
+            reconnect = True
+        self.ax = ax
+        if reconnect:
             self.connect_default_events()
 
         # Reset
@@ -2332,10 +2835,11 @@ class SpanSelector(_SelectorWidget):
         else:
             trans = ax.get_yaxis_transform()
             w, h = 1, 0
-        rect_artist = Rectangle((0, 0), w, h,
-                                transform=trans,
-                                visible=False,
-                                **self._props)
+        rect_artist = Rectangle((0, 0), w, h, transform=trans, visible=False)
+        if _props is not None:
+            rect_artist.update(_props)
+        elif self._selection_artist is not None:
+            rect_artist.update_from(self._selection_artist)
 
         self.ax.add_patch(rect_artist)
         self._selection_artist = rect_artist
@@ -2349,7 +2853,7 @@ class SpanSelector(_SelectorWidget):
         self._edge_handles = ToolLineHandles(self.ax, positions,
                                              direction=self.direction,
                                              line_props=props,
-                                             useblit=self.useblit)
+                                             useblit=self._useblit)
 
     @property
     def _handles_artists(self):
@@ -2358,7 +2862,7 @@ class SpanSelector(_SelectorWidget):
         else:
             return ()
 
-    def _set_cursor(self, enabled):
+    def _set_span_cursor(self, *, enabled):
         """Update the canvas cursor based on direction of the selector."""
         if enabled:
             cursor = (backend_tools.Cursors.RESIZE_HORIZONTAL
@@ -2367,7 +2871,7 @@ class SpanSelector(_SelectorWidget):
         else:
             cursor = backend_tools.Cursors.POINTER
 
-        self.ax.figure.canvas.set_cursor(cursor)
+        self._set_cursor(cursor)
 
     def connect_default_events(self):
         # docstring inherited
@@ -2377,7 +2881,7 @@ class SpanSelector(_SelectorWidget):
 
     def _press(self, event):
         """Button press event handler."""
-        self._set_cursor(True)
+        self._set_span_cursor(enabled=True)
         if self._interactive and self._selection_artist.get_visible():
             self._set_active_handle(event)
         else:
@@ -2388,20 +2892,16 @@ class SpanSelector(_SelectorWidget):
             self.update()
 
         v = event.xdata if self.direction == 'horizontal' else event.ydata
-        # self._pressv and self._prev are deprecated but we still need to
-        # maintain them
-        self._pressv = v
-        self._prev = self._get_data(event)
 
         if self._active_handle is None and not self.ignore_event_outside:
             # when the press event outside the span, we initially set the
             # visibility to False and extents to (v, v)
             # update will be called when setting the extents
-            self.visible = False
-            self.extents = v, v
+            self._visible = False
+            self._set_extents((v, v))
             # We need to set the visibility back, so the span selector will be
             # drawn when necessary (span width > 0)
-            self.visible = True
+            self._visible = True
         else:
             self.set_visible(True)
 
@@ -2428,11 +2928,10 @@ class SpanSelector(_SelectorWidget):
         else:
             self._direction = direction
 
+    @_call_with_reparented_event
     def _release(self, event):
         """Button release event handler."""
-        self._set_cursor(False)
-        # self._pressv is deprecated but we still need to maintain it
-        self._pressv = None
+        self._set_span_cursor(enabled=False)
 
         if not self._interactive:
             self._selection_artist.set_visible(False)
@@ -2461,6 +2960,7 @@ class SpanSelector(_SelectorWidget):
 
         return False
 
+    @_call_with_reparented_event
     def _hover(self, event):
         """Update the canvas cursor if it's over a handle."""
         if self.ignore(event):
@@ -2474,18 +2974,16 @@ class SpanSelector(_SelectorWidget):
             return
 
         _, e_dist = self._edge_handles.closest(event.x, event.y)
-        self._set_cursor(e_dist <= self.grab_range)
+        self._set_span_cursor(enabled=e_dist <= self.grab_range)
 
     def _onmove(self, event):
         """Motion notify event handler."""
 
-        # self._prev are deprecated but we still need to maintain it
-        self._prev = self._get_data(event)
-
-        v = event.xdata if self.direction == 'horizontal' else event.ydata
         if self.direction == 'horizontal':
+            v = event.xdata
             vpress = self._eventpress.xdata
         else:
+            v = event.ydata
             vpress = self._eventpress.ydata
 
         # move existing span
@@ -2514,7 +3012,7 @@ class SpanSelector(_SelectorWidget):
             if vmin > vmax:
                 vmin, vmax = vmax, vmin
 
-        self.extents = vmin, vmax
+        self._set_extents((vmin, vmax))
 
         if self.onmove_callback is not None:
             self.onmove_callback(vmin, vmax)
@@ -2561,9 +3059,23 @@ class SpanSelector(_SelectorWidget):
         """Return True if event is within the patch."""
         return self._selection_artist.contains(event, radius=0)[0]
 
+    @staticmethod
+    def _snap(values, snap_values):
+        """Snap values to a given array values (snap_values)."""
+        # take into account machine precision
+        eps = np.min(np.abs(np.diff(snap_values))) * 1e-12
+        return tuple(
+            snap_values[np.abs(snap_values - v + np.sign(v) * eps).argmin()]
+            for v in values)
+
     @property
     def extents(self):
-        """Return extents of the span selector."""
+        """
+        (float, float)
+            The values, in data coordinates, for the start and end points of the current
+            selection. If there is no selection then the start and end values will be
+            the same.
+        """
         if self.direction == 'horizontal':
             vmin = self._selection_artist.get_x()
             vmax = vmin + self._selection_artist.get_width()
@@ -2574,12 +3086,18 @@ class SpanSelector(_SelectorWidget):
 
     @extents.setter
     def extents(self, extents):
+        self._set_extents(extents)
+        self._selection_completed = True
+
+    def _set_extents(self, extents):
         # Update displayed shape
+        if self.snap_values is not None:
+            extents = tuple(self._snap(extents, self.snap_values))
         self._draw_shape(*extents)
         if self._interactive:
             # Update displayed handles
             self._edge_handles.set_data(self.extents)
-        self.set_visible(self.visible)
+        self.set_visible(self._visible)
         self.update()
 
 
@@ -2589,30 +3107,32 @@ class ToolLineHandles:
 
     Parameters
     ----------
-    ax : `matplotlib.axes.Axes`
-        Matplotlib axes where tool handles are displayed.
+    ax : `~matplotlib.axes.Axes`
+        Matplotlib Axes where tool handles are displayed.
     positions : 1D array
         Positions of handles in data coordinates.
     direction : {"horizontal", "vertical"}
         Direction of handles, either 'vertical' or 'horizontal'
     line_props : dict, optional
-        Additional line properties. See `matplotlib.lines.Line2D`.
+        Additional line properties. See `.Line2D`.
     useblit : bool, default: True
         Whether to use blitting for faster drawing (if supported by the
-        backend). See the tutorial :doc:`/tutorials/advanced/blitting`
+        backend). See the tutorial :ref:`blitting`
         for details.
     """
 
-    def __init__(self, ax, positions, direction, line_props=None,
+    def __init__(self, ax, positions, direction, *, line_props=None,
                  useblit=True):
         self.ax = ax
 
         _api.check_in_list(['horizontal', 'vertical'], direction=direction)
         self._direction = direction
 
-        if line_props is None:
-            line_props = {}
-        line_props.update({'visible': False, 'animated': useblit})
+        line_props = {
+            **(line_props if line_props is not None else {}),
+            'visible': False,
+            'animated': useblit,
+        }
 
         line_fun = ax.axvline if self.direction == 'horizontal' else ax.axhline
 
@@ -2635,8 +3155,8 @@ class ToolLineHandles:
 
     def set_data(self, positions):
         """
-        Set x or y positions of handles, depending if the lines are vertical
-        of horizontal.
+        Set x- or y-positions of handles, depending on if the lines are
+        vertical or horizontal.
 
         Parameters
         ----------
@@ -2697,26 +3217,26 @@ class ToolHandles:
 
     Parameters
     ----------
-    ax : `matplotlib.axes.Axes`
-        Matplotlib axes where tool handles are displayed.
+    ax : `~matplotlib.axes.Axes`
+        Matplotlib Axes where tool handles are displayed.
     x, y : 1D arrays
         Coordinates of control handles.
     marker : str, default: 'o'
-        Shape of marker used to display handle. See `matplotlib.pyplot.plot`.
+        Shape of marker used to display handle. See `~.pyplot.plot`.
     marker_props : dict, optional
-        Additional marker properties. See `matplotlib.lines.Line2D`.
+        Additional marker properties. See `.Line2D`.
     useblit : bool, default: True
         Whether to use blitting for faster drawing (if supported by the
-        backend). See the tutorial :doc:`/tutorials/advanced/blitting`
+        backend). See the tutorial :ref:`blitting`
         for details.
     """
 
-    def __init__(self, ax, x, y, marker='o', marker_props=None, useblit=True):
+    def __init__(self, ax, x, y, *, marker='o', marker_props=None, useblit=True):
         self.ax = ax
         props = {'marker': marker, 'markersize': 7, 'markerfacecolor': 'w',
                  'linestyle': 'none', 'alpha': 0.5, 'visible': False,
                  'label': '_nolegend_',
-                 **cbook.normalize_kwargs(marker_props, Line2D._alias_map)}
+                 **cbook.normalize_kwargs(marker_props, Line2D)}
         self._markers = Line2D(x, y, animated=useblit, **props)
         self.ax.add_line(self._markers)
 
@@ -2761,9 +3281,9 @@ _RECTANGLESELECTOR_PARAMETERS_DOCSTRING = \
     Parameters
     ----------
     ax : `~matplotlib.axes.Axes`
-        The parent axes for the widget.
+        The parent Axes for the widget.
 
-    onselect : function
+    onselect : function, optional
         A callback function that is called after a release event and the
         selection is created, changed or removed.
         It must have the signature::
@@ -2778,17 +3298,17 @@ _RECTANGLESELECTOR_PARAMETERS_DOCSTRING = \
         (when already existing) or cancelled.
 
     minspany : float, default: 0
-        Selections with an y-span less than or equal to *minspanx* are removed
+        Selections with a y-span less than or equal to *minspanx* are removed
         (when already existing) or cancelled.
 
     useblit : bool, default: False
         Whether to use blitting for faster drawing (if supported by the
-        backend). See the tutorial :doc:`/tutorials/advanced/blitting`
+        backend). See the tutorial :ref:`blitting`
         for details.
 
     props : dict, optional
         Properties with which the __ARTIST_NAME__ is drawn. See
-        `matplotlib.patches.Patch` for valid properties.
+        `.Patch` for valid properties.
         Default:
 
         ``dict(facecolor='red', edgecolor='black', alpha=0.2, fill=True)``
@@ -2806,7 +3326,7 @@ _RECTANGLESELECTOR_PARAMETERS_DOCSTRING = \
 
     handle_props : dict, optional
         Properties with which the interactive handles (marker artists) are
-        drawn. See the marker arguments in `matplotlib.lines.Line2D` for valid
+        drawn. See the marker arguments in `.Line2D` for valid
         properties.  Default values are defined in ``mpl.rcParams`` except for
         the default value of ``markeredgecolor`` which will be the same as the
         ``edgecolor`` property in *props*.
@@ -2844,11 +3364,18 @@ _RECTANGLESELECTOR_PARAMETERS_DOCSTRING = \
     """
 
 
-@docstring.Substitution(_RECTANGLESELECTOR_PARAMETERS_DOCSTRING.replace(
+class _RectangleSelectorAction(enum.Enum):
+    ROTATE = enum.auto()
+    MOVE = enum.auto()
+    RESIZE = enum.auto()
+    CREATE = enum.auto()
+
+
+@_docstring.Substitution(_RECTANGLESELECTOR_PARAMETERS_DOCSTRING.replace(
     '__ARTIST_NAME__', 'rectangle'))
 class RectangleSelector(_SelectorWidget):
     """
-    Select a rectangular region of an axes.
+    Select a rectangular region of an Axes.
 
     For the cursor to remain responsive you must keep a reference to it.
 
@@ -2869,31 +3396,23 @@ class RectangleSelector(_SelectorWidget):
     ...     print(erelease.xdata, erelease.ydata)
     >>> props = dict(facecolor='blue', alpha=0.5)
     >>> rect = mwidgets.RectangleSelector(ax, onselect, interactive=True,
-                                          props=props)
+    ...                                   props=props)
     >>> fig.show()
-
-    >>> selector.add_state('square')
+    >>> rect.add_state('square')
 
     See also: :doc:`/gallery/widgets/rectangle_selector`
     """
 
-    @_api.rename_parameter("3.5", "maxdist", "grab_range")
-    @_api.rename_parameter("3.5", "marker_props", "handle_props")
-    @_api.rename_parameter("3.5", "rectprops", "props")
-    @_api.delete_parameter("3.5", "drawtype")
-    @_api.delete_parameter("3.5", "lineprops")
-    def __init__(self, ax, onselect, drawtype='box',
-                 minspanx=0, minspany=0, useblit=False,
-                 lineprops=None, props=None, spancoords='data',
-                 button=None, grab_range=10, handle_props=None,
-                 interactive=False, state_modifier_keys=None,
-                 drag_from_anywhere=False, ignore_event_outside=False,
-                 use_data_coordinates=False):
+    def __init__(self, ax, onselect=None, *, minspanx=0,
+                 minspany=0, useblit=False,
+                 props=None, spancoords='data', button=None, grab_range=10,
+                 handle_props=None, interactive=False,
+                 state_modifier_keys=None, drag_from_anywhere=False,
+                 ignore_event_outside=False, use_data_coordinates=False):
         super().__init__(ax, onselect, useblit=useblit, button=button,
                          state_modifier_keys=state_modifier_keys,
                          use_data_coordinates=use_data_coordinates)
 
-        self.visible = True
         self._interactive = interactive
         self.drag_from_anywhere = drag_from_anywhere
         self.ignore_event_outside = ignore_event_outside
@@ -2905,36 +3424,13 @@ class RectangleSelector(_SelectorWidget):
         # interactive bounding box to allow the polygon to be easily resized
         self._allow_creation = True
 
-        if drawtype == 'none':  # draw a line but make it invisible
-            _api.warn_deprecated(
-                "3.5", message="Support for drawtype='none' is deprecated "
-                               "since %(since)s and will be removed "
-                               "%(removal)s."
-                               "Use props=dict(visible=False) instead.")
-            drawtype = 'line'
-            self.visible = False
-
-        if drawtype == 'box':
-            if props is None:
-                props = dict(facecolor='red', edgecolor='black',
-                             alpha=0.2, fill=True)
-            props['animated'] = self.useblit
-            self.visible = props.pop('visible', self.visible)
-            self._props = props
-            to_draw = self._init_shape(**self._props)
-            self.ax.add_patch(to_draw)
-        if drawtype == 'line':
-            _api.warn_deprecated(
-                "3.5", message="Support for drawtype='line' is deprecated "
-                               "since %(since)s and will be removed "
-                               "%(removal)s.")
-            if lineprops is None:
-                lineprops = dict(color='black', linestyle='-',
-                                 linewidth=2, alpha=0.5)
-            lineprops['animated'] = self.useblit
-            self._props = lineprops
-            to_draw = Line2D([0, 0], [0, 0], visible=False, **self._props)
-            self.ax.add_line(to_draw)
+        if props is None:
+            props = dict(facecolor='red', edgecolor='black',
+                         alpha=0.2, fill=True)
+        props = {**props, 'animated': self._useblit}
+        self._visible = props.pop('visible', self._visible)
+        to_draw = self._init_shape(**props)
+        self.ax.add_patch(to_draw)
 
         self._selection_artist = to_draw
         self._set_aspect_ratio_correction()
@@ -2944,50 +3440,34 @@ class RectangleSelector(_SelectorWidget):
 
         _api.check_in_list(['data', 'pixels'], spancoords=spancoords)
         self.spancoords = spancoords
-        self._drawtype = drawtype
 
         self.grab_range = grab_range
 
         if self._interactive:
             self._handle_props = {
-                'markeredgecolor': (self._props or {}).get(
-                    'edgecolor', 'black'),
+                'markeredgecolor': (props or {}).get('edgecolor', 'black'),
                 **cbook.normalize_kwargs(handle_props, Line2D)}
 
             self._corner_order = ['SW', 'SE', 'NE', 'NW']
             xc, yc = self.corners
             self._corner_handles = ToolHandles(self.ax, xc, yc,
                                                marker_props=self._handle_props,
-                                               useblit=self.useblit)
+                                               useblit=self._useblit)
 
             self._edge_order = ['W', 'S', 'E', 'N']
             xe, ye = self.edge_centers
             self._edge_handles = ToolHandles(self.ax, xe, ye, marker='s',
                                              marker_props=self._handle_props,
-                                             useblit=self.useblit)
+                                             useblit=self._useblit)
 
             xc, yc = self.center
             self._center_handle = ToolHandles(self.ax, [xc], [yc], marker='s',
                                               marker_props=self._handle_props,
-                                              useblit=self.useblit)
+                                              useblit=self._useblit)
 
             self._active_handle = None
 
         self._extents_on_press = None
-
-    to_draw = _api.deprecated("3.5")(
-        property(lambda self: self._selection_artist)
-        )
-
-    drawtype = _api.deprecate_privatize_attribute("3.5")
-
-    active_handle = _api.deprecate_privatize_attribute("3.5")
-
-    interactive = _api.deprecate_privatize_attribute("3.5")
-
-    maxdist = _api.deprecated("3.5", name="maxdist", alternative="grab_range")(
-        property(lambda self: self.grab_range,
-                 lambda self, value: setattr(self, "grab_range", value)))
 
     @property
     def _handles_artists(self):
@@ -3000,8 +3480,7 @@ class RectangleSelector(_SelectorWidget):
 
     def _press(self, event):
         """Button press event handler."""
-        # make the drawn box/line visible get the click-coordinates,
-        # button, ...
+        # make the drawn box/line visible get the click-coordinates, button, ...
         if self._interactive and self._selection_artist.get_visible():
             self._set_active_handle(event)
         else:
@@ -3014,11 +3493,9 @@ class RectangleSelector(_SelectorWidget):
 
         if (self._active_handle is None and not self.ignore_event_outside and
                 self._allow_creation):
-            x = event.xdata
-            y = event.ydata
-            self.visible = False
-            self.extents = x, x, y, y
-            self.visible = True
+            self._visible = False
+            self.extents = event.xdata, event.xdata, event.ydata, event.ydata
+            self._visible = True
         else:
             self.set_visible(True)
 
@@ -3026,10 +3503,24 @@ class RectangleSelector(_SelectorWidget):
         self._rotation_on_press = self._rotation
         self._set_aspect_ratio_correction()
 
+        match self._get_action():
+            case _RectangleSelectorAction.ROTATE:
+                # TODO: set to a rotate cursor if possible?
+                pass
+            case _RectangleSelectorAction.MOVE:
+                self._set_cursor(backend_tools.cursors.MOVE)
+            case _RectangleSelectorAction.RESIZE:
+                # TODO: set to a resize cursor if possible?
+                pass
+            case _RectangleSelectorAction.CREATE:
+                self._set_cursor(backend_tools.cursors.SELECT_REGION)
+
         return False
 
+    @_call_with_reparented_event
     def _release(self, event):
         """Button release event handler."""
+        self._set_cursor(backend_tools.Cursors.POINTER)
         if not self._interactive:
             self._selection_artist.set_visible(False)
 
@@ -3061,14 +3552,11 @@ class RectangleSelector(_SelectorWidget):
                                spancoords=self.spancoords)
         # check if drawn distance (if it exists) is not too small in
         # either x or y-direction
-        minspanxy = (spanx <= self.minspanx or spany <= self.minspany)
-        if (self._drawtype != 'none' and minspanxy):
-            for artist in self.artists:
-                artist.set_visible(False)
+        if spanx <= self.minspanx or spany <= self.minspany:
             if self._selection_completed:
                 # Call onselect, only when the selection is already existing
                 self.onselect(self._eventpress, self._eventrelease)
-            self._selection_completed = False
+            self._clear_without_update()
         else:
             self.onselect(self._eventpress, self._eventrelease)
             self._selection_completed = True
@@ -3076,8 +3564,18 @@ class RectangleSelector(_SelectorWidget):
         self.update()
         self._active_handle = None
         self._extents_on_press = None
-
         return False
+
+    def _get_action(self):
+        state = self._state
+        if 'rotate' in state and self._active_handle in self._corner_order:
+            return _RectangleSelectorAction.ROTATE
+        elif self._active_handle == 'C':
+            return _RectangleSelectorAction.MOVE
+        elif self._active_handle:
+            return _RectangleSelectorAction.RESIZE
+
+        return _RectangleSelectorAction.CREATE
 
     def _onmove(self, event):
         """
@@ -3093,21 +3591,17 @@ class RectangleSelector(_SelectorWidget):
         # The calculations are done for rotation at zero: we apply inverse
         # transformation to events except when we rotate and move
         state = self._state
-        rotate = ('rotate' in state and
-                  self._active_handle in self._corner_order)
-        move = self._active_handle == 'C'
-        resize = self._active_handle and not move
+        action = self._get_action()
 
-        if resize:
+        xdata, ydata = event.xdata, event.ydata
+        if action == _RectangleSelectorAction.RESIZE:
             inv_tr = self._get_rotation_transform().inverted()
-            event.xdata, event.ydata = inv_tr.transform(
-                [event.xdata, event.ydata])
+            xdata, ydata = inv_tr.transform([xdata, ydata])
             eventpress.xdata, eventpress.ydata = inv_tr.transform(
-                [eventpress.xdata, eventpress.ydata]
-                )
+                (eventpress.xdata, eventpress.ydata))
 
-        dx = event.xdata - eventpress.xdata
-        dy = event.ydata - eventpress.ydata
+        dx = xdata - eventpress.xdata
+        dy = ydata - eventpress.ydata
         # refmax is used when moving the corner handle with the square state
         # and is the maximum between refx and refy
         refmax = None
@@ -3120,18 +3614,18 @@ class RectangleSelector(_SelectorWidget):
 
         x0, x1, y0, y1 = self._extents_on_press
         # rotate an existing shape
-        if rotate:
+        if action == _RectangleSelectorAction.ROTATE:
             # calculate angle abc
-            a = np.array([eventpress.xdata, eventpress.ydata])
-            b = np.array(self.center)
-            c = np.array([event.xdata, event.ydata])
+            a = (eventpress.xdata, eventpress.ydata)
+            b = self.center
+            c = (xdata, ydata)
             angle = (np.arctan2(c[1]-b[1], c[0]-b[0]) -
                      np.arctan2(a[1]-b[1], a[0]-b[0]))
             self.rotation = np.rad2deg(self._rotation_on_press + angle)
 
-        elif resize:
+        elif action == _RectangleSelectorAction.RESIZE:
             size_on_press = [x1 - x0, y1 - y0]
-            center = [x0 + size_on_press[0] / 2, y0 + size_on_press[1] / 2]
+            center = (x0 + size_on_press[0] / 2, y0 + size_on_press[1] / 2)
 
             # Keeping the center fixed
             if 'center' in state:
@@ -3141,19 +3635,19 @@ class RectangleSelector(_SelectorWidget):
                     if self._active_handle in self._corner_order:
                         refmax = max(refx, refy, key=abs)
                     if self._active_handle in ['E', 'W'] or refmax == refx:
-                        hw = event.xdata - center[0]
+                        hw = xdata - center[0]
                         hh = hw / self._aspect_ratio_correction
                     else:
-                        hh = event.ydata - center[1]
+                        hh = ydata - center[1]
                         hw = hh * self._aspect_ratio_correction
                 else:
                     hw = size_on_press[0] / 2
                     hh = size_on_press[1] / 2
                     # cancel changes in perpendicular direction
                     if self._active_handle in ['E', 'W'] + self._corner_order:
-                        hw = abs(event.xdata - center[0])
+                        hw = abs(xdata - center[0])
                     if self._active_handle in ['N', 'S'] + self._corner_order:
-                        hh = abs(event.ydata - center[1])
+                        hh = abs(ydata - center[1])
 
                 x0, x1, y0, y1 = (center[0] - hw, center[0] + hw,
                                   center[1] - hh, center[1] + hh)
@@ -3166,26 +3660,24 @@ class RectangleSelector(_SelectorWidget):
                 if 'S' in self._active_handle:
                     y0 = y1
                 if self._active_handle in ['E', 'W'] + self._corner_order:
-                    x1 = event.xdata
+                    x1 = xdata
                 if self._active_handle in ['N', 'S'] + self._corner_order:
-                    y1 = event.ydata
+                    y1 = ydata
                 if 'square' in state:
                     # when using a corner, find which reference to use
                     if self._active_handle in self._corner_order:
                         refmax = max(refx, refy, key=abs)
                     if self._active_handle in ['E', 'W'] or refmax == refx:
-                        sign = np.sign(event.ydata - y0)
-                        y1 = y0 + sign * abs(x1 - x0) / \
-                            self._aspect_ratio_correction
+                        sign = np.sign(ydata - y0)
+                        y1 = y0 + sign * abs(x1 - x0) / self._aspect_ratio_correction
                     else:
-                        sign = np.sign(event.xdata - x0)
-                        x1 = x0 + sign * abs(y1 - y0) * \
-                            self._aspect_ratio_correction
+                        sign = np.sign(xdata - x0)
+                        x1 = x0 + sign * abs(y1 - y0) * self._aspect_ratio_correction
 
-        elif move:
+        elif action == _RectangleSelectorAction.MOVE:
             x0, x1, y0, y1 = self._extents_on_press
-            dx = event.xdata - eventpress.xdata
-            dy = event.ydata - eventpress.ydata
+            dx = xdata - eventpress.xdata
+            dy = ydata - eventpress.ydata
             x0 += dx
             x1 += dx
             y0 += dy
@@ -3200,8 +3692,8 @@ class RectangleSelector(_SelectorWidget):
                     not self._allow_creation):
                 return
             center = [eventpress.xdata, eventpress.ydata]
-            dx = (event.xdata - center[0]) / 2.
-            dy = (event.ydata - center[1]) / 2.
+            dx = (xdata - center[0]) / 2
+            dy = (ydata - center[1]) / 2
 
             # square shape
             if 'square' in state:
@@ -3228,22 +3720,10 @@ class RectangleSelector(_SelectorWidget):
 
     @property
     def _rect_bbox(self):
-        if self._drawtype == 'box':
-            return self._selection_artist.get_bbox().bounds
-        else:
-            x, y = self._selection_artist.get_data()
-            x0, x1 = min(x), max(x)
-            y0, y1 = min(y), max(y)
-            return x0, y0, x1 - x0, y1 - y0
+        return self._selection_artist.get_bbox().bounds
 
     def _set_aspect_ratio_correction(self):
         aspect_ratio = self.ax._get_aspect_ratio()
-        if not hasattr(self._selection_artist, '_aspect_ratio_correction'):
-            # Aspect ratio correction is not supported with deprecated
-            # drawtype='line'. Remove this block in matplotlib 3.7
-            self._aspect_ratio_correction = 1
-            return
-
         self._selection_artist._aspect_ratio_correction = aspect_ratio
         if self._use_data_coordinates:
             self._aspect_ratio_correction = 1
@@ -3274,7 +3754,7 @@ class RectangleSelector(_SelectorWidget):
     @property
     def edge_centers(self):
         """
-        Midpoint of rectangle edges in data coordiantes from left,
+        Midpoint of rectangle edges in data coordinates from left,
         moving anti-clockwise.
         """
         x0, y0, width, height = self._rect_bbox
@@ -3311,8 +3791,9 @@ class RectangleSelector(_SelectorWidget):
             # Update displayed handles
             self._corner_handles.set_data(*self.corners)
             self._edge_handles.set_data(*self.edge_centers)
-            self._center_handle.set_data(*self.center)
-        self.set_visible(self.visible)
+            x, y = self.center
+            self._center_handle.set_data([x], [y])
+        self.set_visible(self._visible)
         self.update()
 
     @property
@@ -3332,8 +3813,6 @@ class RectangleSelector(_SelectorWidget):
             # call extents setter to draw shape and update handles positions
             self.extents = self.extents
 
-    draw_shape = _api.deprecate_privatize_attribute('3.5')
-
     def _draw_shape(self, extents):
         x0, x1, y0, y1 = extents
         xmin, xmax = sorted([x0, x1])
@@ -3346,15 +3825,11 @@ class RectangleSelector(_SelectorWidget):
         xmax = min(xmax, xlim[1])
         ymax = min(ymax, ylim[1])
 
-        if self._drawtype == 'box':
-            self._selection_artist.set_x(xmin)
-            self._selection_artist.set_y(ymin)
-            self._selection_artist.set_width(xmax - xmin)
-            self._selection_artist.set_height(ymax - ymin)
-            self._selection_artist.set_angle(self.rotation)
-
-        elif self._drawtype == 'line':
-            self._selection_artist.set_data([xmin, xmax], [ymin, ymax])
+        self._selection_artist.set_x(xmin)
+        self._selection_artist.set_y(ymin)
+        self._selection_artist.set_width(xmax - xmin)
+        self._selection_artist.set_height(ymax - ymin)
+        self._selection_artist.set_angle(self.rotation)
 
     def _set_active_handle(self, event):
         """Set active handle based on the location of the mouse event."""
@@ -3404,11 +3879,11 @@ class RectangleSelector(_SelectorWidget):
             return np.array(self._selection_artist.get_data())
 
 
-@docstring.Substitution(_RECTANGLESELECTOR_PARAMETERS_DOCSTRING.replace(
+@_docstring.Substitution(_RECTANGLESELECTOR_PARAMETERS_DOCSTRING.replace(
     '__ARTIST_NAME__', 'ellipse'))
 class EllipseSelector(RectangleSelector):
     """
-    Select an elliptical region of an axes.
+    Select an elliptical region of an Axes.
 
     For the cursor to remain responsive you must keep a reference to it.
 
@@ -3422,9 +3897,6 @@ class EllipseSelector(RectangleSelector):
     --------
     :doc:`/gallery/widgets/rectangle_selector`
     """
-
-    draw_shape = _api.deprecate_privatize_attribute('3.5')
-
     def _init_shape(self, **props):
         return Ellipse((0, 0), 0, 1, visible=False, **props)
 
@@ -3436,29 +3908,17 @@ class EllipseSelector(RectangleSelector):
         a = (xmax - xmin) / 2.
         b = (ymax - ymin) / 2.
 
-        if self._drawtype == 'box':
-            self._selection_artist.center = center
-            self._selection_artist.width = 2 * a
-            self._selection_artist.height = 2 * b
-            self._selection_artist.angle = self.rotation
-        else:
-            rad = np.deg2rad(np.arange(31) * 12)
-            x = a * np.cos(rad) + center[0]
-            y = b * np.sin(rad) + center[1]
-            self._selection_artist.set_data(x, y)
+        self._selection_artist.center = center
+        self._selection_artist.width = 2 * a
+        self._selection_artist.height = 2 * b
+        self._selection_artist.angle = self.rotation
 
     @property
     def _rect_bbox(self):
-        if self._drawtype == 'box':
-            x, y = self._selection_artist.center
-            width = self._selection_artist.width
-            height = self._selection_artist.height
-            return x - width / 2., y - height / 2., width, height
-        else:
-            x, y = self._selection_artist.get_data()
-            x0, x1 = min(x), max(x)
-            y0, y1 = min(y), max(y)
-            return x0, y0, x1 - x0, y1 - y0
+        x, y = self._selection_artist.center
+        width = self._selection_artist.width
+        height = self._selection_artist.height
+        return x - width / 2., y - height / 2., width, height
 
 
 class LassoSelector(_SelectorWidget):
@@ -3472,7 +3932,7 @@ class LassoSelector(_SelectorWidget):
 
     In contrast to `Lasso`, `LassoSelector` is written with an interface
     similar to `RectangleSelector` and `SpanSelector`, and will continue to
-    interact with the axes until disconnected.
+    interact with the Axes until disconnected.
 
     Example usage::
 
@@ -3486,47 +3946,40 @@ class LassoSelector(_SelectorWidget):
     Parameters
     ----------
     ax : `~matplotlib.axes.Axes`
-        The parent axes for the widget.
-    onselect : function
+        The parent Axes for the widget.
+    onselect : function, optional
         Whenever the lasso is released, the *onselect* function is called and
         passed the vertices of the selected path.
     useblit : bool, default: True
         Whether to use blitting for faster drawing (if supported by the
-        backend). See the tutorial :doc:`/tutorials/advanced/blitting`
+        backend). See the tutorial :ref:`blitting`
         for details.
     props : dict, optional
-        Properties with which the line is drawn, see `matplotlib.lines.Line2D`
+        Properties with which the line is drawn, see `.Line2D`
         for valid properties. Default values are defined in ``mpl.rcParams``.
     button : `.MouseButton` or list of `.MouseButton`, optional
         The mouse buttons used for rectangle selection.  Default is ``None``,
         which corresponds to all buttons.
     """
 
-    @_api.rename_parameter("3.5", "lineprops", "props")
-    def __init__(self, ax, onselect=None, useblit=True, props=None,
-                 button=None):
+    def __init__(self, ax, onselect=None, *, useblit=True, props=None, button=None):
         super().__init__(ax, onselect, useblit=useblit, button=button)
         self.verts = None
-        if props is None:
-            props = dict()
-        # self.useblit may be != useblit, if the canvas doesn't support blit.
-        props.update(animated=self.useblit, visible=False)
+        props = {
+            **(props if props is not None else {}),
+            # Note that self.useblit may be != useblit, if the canvas doesn't
+            # support blitting.
+            'animated': self._useblit, 'visible': False,
+        }
         line = Line2D([], [], **props)
         self.ax.add_line(line)
         self._selection_artist = line
-
-    @_api.deprecated("3.5", alternative="press")
-    def onpress(self, event):
-        self.press(event)
 
     def _press(self, event):
         self.verts = [self._get_data(event)]
         self._selection_artist.set_visible(True)
 
-    @_api.deprecated("3.5", alternative="release")
-    def onrelease(self, event):
-        self.release(event)
-
+    @_call_with_reparented_event
     def _release(self, event):
         if self.verts is not None:
             self.verts.append(self._get_data(event))
@@ -3546,7 +3999,7 @@ class LassoSelector(_SelectorWidget):
 
 class PolygonSelector(_SelectorWidget):
     """
-    Select a polygon region of an axes.
+    Select a polygon region of an Axes.
 
     Place vertices with each mouse click, and make the selection by completing
     the polygon (clicking on the first vertex). Once drawn individual vertices
@@ -3557,7 +4010,7 @@ class PolygonSelector(_SelectorWidget):
 
     - Hold *ctrl* and click and drag a vertex to reposition it before the
       polygon has been completed.
-    - Hold the *shift* key and click and drag anywhere in the axes to move
+    - Hold the *shift* key and click and drag anywhere in the Axes to move
       all vertices.
     - Press the *esc* key to start a new polygon.
 
@@ -3566,28 +4019,27 @@ class PolygonSelector(_SelectorWidget):
     Parameters
     ----------
     ax : `~matplotlib.axes.Axes`
-        The parent axes for the widget.
+        The parent Axes for the widget.
 
-    onselect : function
+    onselect : function, optional
         When a polygon is completed or modified after completion,
         the *onselect* function is called and passed a list of the vertices as
         ``(xdata, ydata)`` tuples.
 
     useblit : bool, default: False
         Whether to use blitting for faster drawing (if supported by the
-        backend). See the tutorial :doc:`/tutorials/advanced/blitting`
+        backend). See the tutorial :ref:`blitting`
         for details.
 
     props : dict, optional
-        Properties with which the line is drawn, see `matplotlib.lines.Line2D`
-        for valid properties.
-        Default:
+        Properties with which the line is drawn, see `.Line2D` for valid properties.
+        Default::
 
-            ``dict(color='k', linestyle='-', linewidth=2, alpha=0.5)``
+            dict(color='k', linestyle='-', linewidth=2, alpha=0.5)
 
     handle_props : dict, optional
         Artist properties for the markers drawn at the vertices of the polygon.
-        See the marker arguments in `matplotlib.lines.Line2D` for valid
+        See the marker arguments in `.Line2D` for valid
         properties.  Default values are defined in ``mpl.rcParams`` except for
         the default value of ``markeredgecolor`` which will be the same as the
         ``color`` property in *props*.
@@ -3611,6 +4063,7 @@ class PolygonSelector(_SelectorWidget):
 
     Examples
     --------
+    :doc:`/gallery/widgets/polygon_selector_simple`
     :doc:`/gallery/widgets/polygon_selector_demo`
 
     Notes
@@ -3620,11 +4073,8 @@ class PolygonSelector(_SelectorWidget):
     point.
     """
 
-    @_api.rename_parameter("3.5", "lineprops", "props")
-    @_api.rename_parameter("3.5", "markerprops", "handle_props")
-    @_api.rename_parameter("3.5", "vertex_select_radius", "grab_range")
-    def __init__(self, ax, onselect, useblit=False,
-                 props=None, handle_props=None, grab_range=10, *,
+    def __init__(self, ax, onselect=None, *, useblit=False,
+                 props=None, handle_props=None, grab_range=10,
                  draw_bounding_box=False, box_handle_props=None,
                  box_props=None):
         # The state modifiers 'move', 'square', and 'center' are expected by
@@ -3644,17 +4094,16 @@ class PolygonSelector(_SelectorWidget):
 
         if props is None:
             props = dict(color='k', linestyle='-', linewidth=2, alpha=0.5)
-        props['animated'] = self.useblit
-        self._props = props
-        self._selection_artist = line = Line2D([], [], **self._props)
+        props = {**props, 'animated': self._useblit}
+        self._selection_artist = line = Line2D([], [], **props)
         self.ax.add_line(line)
 
         if handle_props is None:
             handle_props = dict(markeredgecolor='k',
-                                markerfacecolor=self._props.get('color', 'k'))
+                                markerfacecolor=props.get('color', 'k'))
         self._handle_props = handle_props
         self._polygon_handles = ToolHandles(self.ax, [], [],
-                                            useblit=self.useblit,
+                                            useblit=self._useblit,
                                             marker_props=self._handle_props)
 
         self._active_handle_idx = -1
@@ -3666,7 +4115,7 @@ class PolygonSelector(_SelectorWidget):
 
         if box_handle_props is None:
             box_handle_props = {}
-        self._box_handle_props = self._handle_props.update(box_handle_props)
+        self._box_handle_props = {**self._handle_props, **box_handle_props}
         self._box_props = box_props
 
     def _get_bbox(self):
@@ -3674,8 +4123,7 @@ class PolygonSelector(_SelectorWidget):
 
     def _add_box(self):
         self._box = RectangleSelector(self.ax,
-                                      onselect=lambda *args, **kwargs: None,
-                                      useblit=self.useblit,
+                                      useblit=self._useblit,
                                       grab_range=self.grab_range,
                                       handle_props=self._box_handle_props,
                                       props=self._box_props,
@@ -3702,6 +4150,7 @@ class PolygonSelector(_SelectorWidget):
             # Save a copy
             self._old_box_extents = self._box.extents
 
+    @_call_with_reparented_event
     def _scale_polygon(self, event):
         """
         Scale the polygon selector points when the bounding box is moved or
@@ -3729,16 +4178,6 @@ class PolygonSelector(_SelectorWidget):
         self._xys = [*new_verts, new_verts[0]]
         self._draw_polygon()
         self._old_box_extents = self._box.extents
-
-    line = _api.deprecated("3.5")(
-        property(lambda self: self._selection_artist)
-        )
-
-    vertex_select_radius = _api.deprecated("3.5", name="vertex_select_radius",
-                                           alternative="grab_range")(
-        property(lambda self: self.grab_range,
-                 lambda self, value: setattr(self, "grab_range", value))
-        )
 
     @property
     def _handles_artists(self):
@@ -3776,6 +4215,7 @@ class PolygonSelector(_SelectorWidget):
         # support the 'move_all' state modifier).
         self._xys_at_press = self._xys.copy()
 
+    @_call_with_reparented_event
     def _release(self, event):
         """Button release event handler."""
         # Release active tool handle.
@@ -3800,28 +4240,35 @@ class PolygonSelector(_SelectorWidget):
         if self._selection_completed:
             self.onselect(self.verts)
 
+    @_call_with_reparented_event
     def onmove(self, event):
         """Cursor move event handler and validator."""
         # Method overrides _SelectorWidget.onmove because the polygon selector
         # needs to process the move callback even if there is no button press.
         # _SelectorWidget.onmove include logic to ignore move event if
         # _eventpress is None.
-        if not self.ignore(event):
+        if self.ignore(event):
+            # Hide the cursor when interactive zoom/pan is active
+            if not self.canvas.widgetlock.available(self) and self._xys:
+                self._xys[-1] = (np.nan, np.nan)
+                self._draw_polygon()
+            return False
+
+        else:
             event = self._clean_event(event)
             self._onmove(event)
             return True
-        return False
 
     def _onmove(self, event):
         """Cursor move event handler."""
         # Move the active vertex (ToolHandle).
         if self._active_handle_idx >= 0:
             idx = self._active_handle_idx
-            self._xys[idx] = event.xdata, event.ydata
+            self._xys[idx] = (event.xdata, event.ydata)
             # Also update the end of the polygon line if the first vertex is
             # the active handle and the polygon is completed.
             if idx == 0 and self._selection_completed:
-                self._xys[-1] = event.xdata, event.ydata
+                self._xys[-1] = (event.xdata, event.ydata)
 
         # Move all vertices.
         elif 'move_all' in self._state and self._eventpress:
@@ -3846,7 +4293,7 @@ class PolygonSelector(_SelectorWidget):
             if len(self._xys) > 3 and v0_dist < self.grab_range:
                 self._xys[-1] = self._xys[0]
             else:
-                self._xys[-1] = event.xdata, event.ydata
+                self._xys[-1] = (event.xdata, event.ydata)
 
         self._draw_polygon()
 
@@ -3878,8 +4325,8 @@ class PolygonSelector(_SelectorWidget):
             self._remove_box()
             self.set_visible(True)
 
-    def _draw_polygon(self):
-        """Redraw the polygon based on the new vertex positions."""
+    def _draw_polygon_without_update(self):
+        """Redraw the polygon based on new vertex positions, no update()."""
         xs, ys = zip(*self._xys) if self._xys else ([], [])
         self._selection_artist.set_data(xs, ys)
         self._update_box()
@@ -3892,6 +4339,10 @@ class PolygonSelector(_SelectorWidget):
             self._polygon_handles.set_data(xs[:-1], ys[:-1])
         else:
             self._polygon_handles.set_data(xs, ys)
+
+    def _draw_polygon(self):
+        """Redraw the polygon based on the new vertex positions."""
+        self._draw_polygon_without_update()
         self.update()
 
     @property
@@ -3904,13 +4355,29 @@ class PolygonSelector(_SelectorWidget):
         """
         Set the polygon vertices.
 
-        This will remove any pre-existing vertices, creating a complete polygon
+        This will remove any preexisting vertices, creating a complete polygon
         with the new vertices.
         """
         self._xys = [*xys, xys[0]]
         self._selection_completed = True
         self.set_visible(True)
+        if self._draw_box and self._box is None:
+            self._add_box()
         self._draw_polygon()
+
+    def _clear_without_update(self):
+        self._selection_completed = False
+        prev = self._prev_event
+        if (prev is not None
+                and prev.xdata is not None and prev.ydata is not None
+                and not np.isnan(prev.xdata) and not np.isnan(prev.ydata)):
+            # Reset the pending vertex to the last known cursor position.
+            self._xys = [(prev.xdata, prev.ydata)]
+        else:
+            x0, x1 = self.ax.get_xlim()
+            y0, y1 = self.ax.get_ylim()
+            self._xys = [((x0 + x1) / 2, (y0 + y1) / 2)]
+        self._draw_polygon_without_update()
 
 
 class Lasso(AxesWidget):
@@ -3926,33 +4393,45 @@ class Lasso(AxesWidget):
     Parameters
     ----------
     ax : `~matplotlib.axes.Axes`
-        The parent axes for the widget.
+        The parent Axes for the widget.
     xy : (float, float)
         Coordinates of the start of the lasso.
-    useblit : bool, default: True
-        Whether to use blitting for faster drawing (if supported by the
-        backend). See the tutorial :doc:`/tutorials/advanced/blitting`
-        for details.
     callback : callable
         Whenever the lasso is released, the *callback* function is called and
         passed the vertices of the selected path.
-    """
+    useblit : bool, default: True
+        Whether to use blitting for faster drawing (if supported by the
+        backend). See the tutorial :ref:`blitting`
+        for details.
+    props : dict, optional
+        Lasso line properties. See `.Line2D` for valid properties.
+        Default *props* are::
 
-    def __init__(self, ax, xy, callback=None, useblit=True):
+            {'linestyle' : '-', 'color' : 'black', 'lw' : 2}
+
+        .. versionadded:: 3.9
+    """
+    def __init__(self, ax, xy, callback, *, useblit=True, props=None):
         super().__init__(ax)
 
-        self.useblit = useblit and self.canvas.supports_blit
+        self.useblit = useblit and self.canvas.supports_blit  # TODO: Make dynamic
         if self.useblit:
             self.background = self.canvas.copy_from_bbox(self.ax.bbox)
 
+        style = {'linestyle': '-', 'color': 'black', 'lw': 2}
+
+        if props is not None:
+            style.update(props)
+
         x, y = xy
         self.verts = [(x, y)]
-        self.line = Line2D([x], [y], linestyle='-', color='black', lw=2)
+        self.line = Line2D([x], [y], **style)
         self.ax.add_line(self.line)
         self.callback = callback
         self.connect_event('button_release_event', self.onrelease)
         self.connect_event('motion_notify_event', self.onmove)
 
+    @_call_with_reparented_event
     def onrelease(self, event):
         if self.ignore(event):
             return
@@ -3960,21 +4439,18 @@ class Lasso(AxesWidget):
             self.verts.append((event.xdata, event.ydata))
             if len(self.verts) > 2:
                 self.callback(self.verts)
-            self.ax.lines.remove(self.line)
+            self.line.remove()
         self.verts = None
         self.disconnect_events()
 
+    @_call_with_reparented_event
     def onmove(self, event):
-        if self.ignore(event):
-            return
-        if self.verts is None:
-            return
-        if event.inaxes != self.ax:
-            return
-        if event.button != 1:
+        if (self.ignore(event)
+                or self.verts is None
+                or event.button != 1
+                or not self.ax.contains(event)[0]):
             return
         self.verts.append((event.xdata, event.ydata))
-
         self.line.set_data(list(zip(*self.verts)))
 
         if self.useblit:

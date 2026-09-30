@@ -13,10 +13,8 @@ testing infrastructure are in :mod:`matplotlib.testing`.
 .. _pytest-xdist: https://pypi.org/project/pytest-xdist/
 
 
-.. _testing_requirements:
-
-Requirements
-------------
+Prerequisites
+-------------
 
 To run the tests you will need to
 :ref:`set up Matplotlib for development <installing_for_devs>`. Note in
@@ -32,16 +30,18 @@ particular the :ref:`additional dependencies <test-dependencies>` for testing.
    You have to additionally get the reference images from the repository,
    because they are not distributed with pre-built Matplotlib packages.
 
-Running the tests
------------------
+.. _run_tests:
+
+Run the tests
+-------------
 
 In the root directory of your development repository run::
 
-   python -m pytest
+   pytest
 
 
-pytest can be configured via a lot of `command-line parameters`_. Some
-particularly useful ones are:
+``pytest`` can be configured via many :external+pytest:doc:`command-line parameters
+<how-to/usage>`. Some particularly useful ones are:
 
 =============================  ===========
 ``-v`` or ``--verbose``        Be more verbose
@@ -50,52 +50,151 @@ particularly useful ones are:
 ``--capture=no`` or ``-s``     Do not capture stdout
 =============================  ===========
 
-To run a single test from the command line, you can provide a file path,
-optionally followed by the function separated by two colons, e.g., (tests do
-not need to be installed, but Matplotlib should be)::
+Some tests may use a large amount of memory (>0.5GiB); to enable those tests, set the
+environment variable ``MPL_TEST_EXPENSIVE``.
+
+To run a single test from the command line, you can provide a file path, optionally
+followed by the function separated by two colons, e.g., (tests do not need to be
+installed, but Matplotlib should be)::
 
   pytest lib/matplotlib/tests/test_simplification.py::test_clipping
 
+If you want to use ``pytest`` as a module (via ``python -m pytest``), then you will need
+to avoid clashes between ``pytest``'s import mode and Python's search path:
 
-.. _command-line parameters: http://doc.pytest.org/en/latest/usage.html
+- On more recent Python, you may :external+python:std:option:`disable "unsafe import
+  paths" <-P>` (i.e., stop adding the current directory to the import path) with the
+  ``-P`` argument::
+
+      python -P -m pytest
+
+- On older Python, you may enable :external+python:std:option:`isolated mode <-I>`
+  (which stops adding the current directory to the import path, but has other
+  repercussions)::
+
+      python -I -m pytest
+
+- On any Python, set ``pytest``'s :external+pytest:doc:`import mode
+  <explanation/pythonpath>` to the older ``prepend`` mode (but note that this will break
+  ``pytest``'s assert rewriting)::
+
+      python -m pytest --import-mode prepend
+
+View image test output
+^^^^^^^^^^^^^^^^^^^^^^
+
+The output of :ref:`image-based <image-comparison>` tests is stored in a
+``result_images`` directory. These images can be compiled into one HTML page, containing
+hundreds of images, using the ``visualize_tests`` tool::
+
+    python tools/visualize_tests.py
+
+Image test failures can also be analysed using the ``triage_tests`` tool::
+
+    python tools/triage_tests.py
+
+The triage tool allows you to accept or reject test failures and will copy the new image
+to the folder where the baseline test images are stored. The triage tool requires that
+:ref:`QT <backend_dependencies>` is installed.
 
 
-Writing a simple test
----------------------
+Write tests
+-----------
+Tests are located in :file:`lib/matplotlib/tests`. They are organized to mirror
+the structure of the code in :file:`lib/matplotlib`. For example, tests for
+the ``mathtext.py`` module are in :file:`lib/matplotlib/tests/test_mathtext.py`.
 
-Many elements of Matplotlib can be tested using standard tests. For
-example, here is a test from :file:`matplotlib/tests/test_basic.py`::
+Naming follows standard pytest conventions:
 
-  def test_simple():
-      """
-      very simple example test
-      """
-      assert 1 + 1 == 2
+- files begin with ``"test_"``
+- test functions begin with ``"test_"``
+- test classes begin with ``"Test"``.
 
-Pytest determines which functions are tests by searching for files whose names
-begin with ``"test_"`` and then within those files for functions beginning with
-``"test"`` or classes beginning with ``"Test"``.
+We prefer simple test functions, but test classes are also acceptable.
+Test function names should be descriptive of what they are testing, and long names
+like ``test_to_rgba_array_accepts_color_alpha_tuple_with_multiple_colors()`` are
+perfectly fine.
 
-Some tests have internal side effects that need to be cleaned up after their
-execution (such as created figures or modified `.rcParams`). The pytest fixture
-``matplotlib.testing.conftest.mpl_test_settings`` will automatically clean
-these up; there is no need to do anything further.
+Unit tests
+^^^^^^^^^^
 
-Random data in tests
---------------------
+Many elements of Matplotlib can be tested using simple unit tests, e.g. ::
 
-Random data is a very convenient way to generate data for examples,
-however the randomness is problematic for testing (as the tests
-must be deterministic!).  To work around this set the seed in each test.
-For numpy use::
+  def test_to_rgba_explicit_alpha_overrides_tuple_alpha():
+      assert mcolors.to_rgba(('red', 0.1), alpha=0.9) == (1, 0, 0, 0.9)
+
+Data in tests
+^^^^^^^^^^^^^
+Try to use minimal explicit data, such as
+``[1, 2, 3]``, ``range(5)`` or ``np.arange(5)``, because it
+makes the test more readable.
+
+When you need more and non-trivial data, generate it programmatically, e.g. ::
+
+   x = np.linspace(0, 2*np.pi, 101)
+   y = 2 * np.sin(x) + 1
+
+Use random numbers only when an algorithmic way to generate the data is too
+cumbersome or impossible. In this case, set the seed to a fixed value to make
+the test deterministic. For numpy's default random number generator use ::
 
   import numpy as np
-  np.random.seed(19680801)
+  rng = np.random.default_rng(19680801)
 
-The seed is John Hunter's birthday.
+and then use ``rng`` when generating the random numbers.
 
-Writing an image comparison test
---------------------------------
+The seed is :ref:`John Hunter's <project_history>` birthday.
+
+Test cleanup
+^^^^^^^^^^^^
+We often need to create figures or to modify `.rcParams` to test some functionality.
+Cleanup of such side effects is handled automatically through a pytest fixture
+(``matplotlib.testing.conftest.mpl_test_settings``) so that no manual cleanup is
+necessary.
+
+In particular, you don't need to call ``plt.close()``.
+
+Testing with figures and Axes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+When you need figures and/or Axes, create them through the standard methods
+(``plt.figure()``, ``plt.subplots()``, etc.).
+
+Creating figures and Axes is rather expensive (>100ms). Only create as many as you need for
+the test, and reuse them if possible. It is perfectly fine to test multiple parametrizations
+or related functionality in one test; i.e. extend the classical test structure
+*Arrange–Act–Assert* with multiple *Act-Assert* blocks, e.g. ::
+
+  def test_stackplot_facecolor():
+      # Test that facecolors are properly passed and take precedence over colors parameter
+      x = np.linspace(0, 10, 10)
+      y1 = 1.0 * x
+      y2 = 2.0 * x + 1
+
+      fig, ax = plt.subplots()
+
+      facecolors = ['r', 'b']
+
+      colls = ax.stackplot(x, y1, y2, facecolor=facecolors, colors=['c', 'm'])
+      for coll, fcolor in zip(colls, facecolors):
+          assert mcolors.same_color(coll.get_facecolor(), fcolor)
+
+     # Plural alias should also work
+      colls = ax.stackplot(x, y1, y2, facecolors=facecolors, colors=['c', 'm'])
+      for coll, fcolor in zip(colls, facecolors):
+          assert mcolors.same_color(coll.get_facecolor(), fcolor)
+
+Assert values rather than visual results when feasible. This is clearer,
+less computationally expensive and less fragile than comparing images, e.g. ::
+
+  def test_savefig_preserve_layout_engine():
+      fig = plt.figure(layout='compressed')
+      fig.savefig(io.BytesIO(), bbox_inches='tight')
+      assert fig.get_layout_engine()._compress
+
+.. _image-comparison:
+
+Testing with reference images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Writing an image-based test is only slightly more difficult than a simple
 test. The main consideration is that you must specify the "baseline", or
@@ -106,8 +205,8 @@ tests it::
    from matplotlib.testing.decorators import image_comparison
    import matplotlib.pyplot as plt
 
-   @image_comparison(baseline_images=['line_dashes'], remove_text=True,
-                     extensions=['png'])
+   @image_comparison(baseline_images=['line_dashes.png'], remove_text=True,
+                     style='mpl20')
    def test_line_dashes():
        fig, ax = plt.subplots()
        ax.plot(range(10), linestyle=(0, (3, 3)), lw=5)
@@ -120,6 +219,25 @@ case :file:`lib/matplotlib/tests/baseline_images/test_lines`).  Put this new
 file under source code revision control (with ``git add``).  When rerunning
 the tests, they should now pass.
 
+If you wish to compare multiple file formats, then omit the extension from the
+baseline image name and optionally pass the *extensions* argument::
+
+   @image_comparison(baseline_images=['line_dashes'], remove_text=True,
+                     extensions=['png', 'svg'], style='mpl20')
+   def test_line_dashes():
+       fig, ax = plt.subplots()
+       ax.plot(range(10), linestyle=(0, (3, 3)), lw=5)
+
+It is preferred that new tests use ``style='mpl20'`` as this leads to smaller
+figures and reflects the newer look of default Matplotlib plots. Also, if the
+texts (labels, tick labels, etc) are not really part of what is tested, use the
+``remove_text=True`` argument or add the ``text_placeholders`` fixture as this
+will lead to smaller figures and reduce possible issues with font mismatch on
+different platforms.
+
+Testing by comparing two methods to create an image
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 Baseline images take a lot of space in the Matplotlib repository.
 An alternative approach for image comparison tests is to use the
 `~matplotlib.testing.decorators.check_figures_equal` decorator, which should be
@@ -128,19 +246,44 @@ images on the figures using two different methods (the tested method and the
 baseline method).  The decorator will arrange for setting up the figures and
 then collect the drawn results and compare them.
 
+For example, this test compares two different methods to draw the same
+circle: plotting a circle using a `matplotlib.patches.Circle` patch
+vs plotting the circle using the parametric equation of a circle ::
+
+   from matplotlib.testing.decorators import check_figures_equal
+   import matplotlib.patches as mpatches
+   import matplotlib.pyplot as plt
+   import numpy as np
+
+   @check_figures_equal()
+   def test_parametric_circle_plot(fig_test, fig_ref):
+
+       xo = yo = 0.5
+       radius = 0.4
+
+       ax_test = fig_test.subplots()
+       theta = np.linspace(0, 2 * np.pi, 150)
+       l, = ax_test.plot(xo + (radius * np.cos(theta)),
+                         yo + (radius * np.sin(theta)), c='r')
+
+       ax_ref = fig_ref.subplots()
+       red_circle_ref = mpatches.Circle((xo, yo), radius, ec='r', fc='none',
+                                        lw=l.get_linewidth())
+       ax_ref.add_artist(red_circle_ref)
+
+       for ax in [ax_ref, ax_test]:
+           ax.set(xlim=(0, 1), ylim=(0, 1), aspect='equal')
+
+Both comparison decorators have a tolerance argument ``tol`` that is used to specify the
+tolerance for difference in color value between the two images, where 255 is the maximal
+difference. The test fails if the average pixel difference is greater than this value.
+
 See the documentation of `~matplotlib.testing.decorators.image_comparison` and
 `~matplotlib.testing.decorators.check_figures_equal` for additional information
 about their use.
 
-Creating a new module in matplotlib.tests
------------------------------------------
-
-We try to keep the tests categorized by the primary module they are
-testing.  For example, the tests related to the ``mathtext.py`` module
-are in ``test_mathtext.py``.
-
-Using GitHub Actions for CI
----------------------------
+CI with GitHub Actions
+----------------------
 
 `GitHub Actions <https://docs.github.com/en/actions>`_ is a hosted CI system
 "in the cloud".
@@ -157,19 +300,21 @@ workflows
 GitHub Actions should be automatically enabled for your personal Matplotlib
 fork once the YAML workflow files are in it. It generally isn't necessary to
 look at these workflows, since any pull request submitted against the main
-Matplotlib repository will be tested.
+Matplotlib repository will be tested. The Tests workflow is skipped in forked
+repositories but you can trigger a run manually from the `GitHub web interface
+<https://docs.github.com/en/actions/managing-workflow-runs/manually-running-a-workflow>`_.
 
 You can see the GitHub Actions results at
 https://github.com/your_GitHub_user_name/matplotlib/actions -- here's `an
 example <https://github.com/QuLogic/matplotlib/actions>`_.
 
 
-Using tox
----------
+tox: Test multiple python versions
+----------------------------------
 
 `Tox <https://tox.readthedocs.io/en/latest/>`_ is a tool for running tests
 against multiple Python environments, including multiple versions of Python
-(e.g., 3.6, 3.7) and even different Python implementations altogether
+(e.g., 3.10, 3.11) and even different Python implementations altogether
 (e.g., CPython, PyPy, Jython, etc.), as long as all these versions are
 available on your system's $PATH (consider using your system package manager,
 e.g. apt-get, yum, or Homebrew, to install them).
@@ -186,16 +331,17 @@ You can also run tox on a subset of environments:
 
 .. code-block:: bash
 
-    $ tox -e py37,py38
+    $ tox -e py312,py314
 
-Tox processes everything serially so it can take a long time to test
-several environments. To speed it up, you might try using a new,
-parallelized version of tox called ``detox``. Give this a try:
+Tox processes environments sequentially by default,
+which can be slow when testing multiple environments.
+To speed this up, tox now includes built-in parallelization support
+via the --parallel flag. Give it a try:
 
 .. code-block:: bash
 
-    $ pip install -U -i http://pypi.testrun.org detox
-    $ detox
+    $ tox --parallel auto
+
 
 Tox is configured using a file called ``tox.ini``. You may need to
 edit this file if you want to add new environments to test (e.g.,
@@ -204,8 +350,8 @@ tests are run. For more info on the ``tox.ini`` file, see the `Tox
 Configuration Specification
 <https://tox.readthedocs.io/en/latest/config.html>`_.
 
-Building old versions of Matplotlib
------------------------------------
+Build old versions of Matplotlib
+--------------------------------
 
 When running a ``git bisect`` to see which commit introduced a certain bug,
 you may (rarely) need to build very old versions of Matplotlib.  The following
@@ -213,8 +359,8 @@ constraints need to be taken into account:
 
 - Matplotlib 1.3 (or earlier) requires numpy 1.8 (or earlier).
 
-Testing released versions of Matplotlib
----------------------------------------
+Test released versions of Matplotlib
+------------------------------------
 Running the tests on an installation of a released version (e.g. PyPI package
 or conda package) also requires additional setup.
 
@@ -243,17 +389,17 @@ The correct target folder can be found using::
 
     python -c "import matplotlib.tests; print(matplotlib.tests.__file__.rsplit('/', 1)[0])"
 
-An analogous copying of :file:`lib/mpl_toolkits/tests/baseline_images`
+An analogous copying of :file:`lib/mpl_toolkits/*/tests/baseline_images`
 is necessary for testing ``mpl_toolkits``.
 
 Run the tests
 ^^^^^^^^^^^^^
-To run the all the tests on your installed version of Matplotlib::
 
-    python -m pytest --pyargs matplotlib.tests
+To run all the tests on your installed version of Matplotlib::
+
+    pytest --pyargs matplotlib.tests
 
 The test discovery scope can be narrowed to single test modules or even single
 functions::
 
-    python -m pytest --pyargs matplotlib.tests.test_simplification.py::test_clipping
-
+    pytest --pyargs matplotlib.tests.test_simplification.py::test_clipping

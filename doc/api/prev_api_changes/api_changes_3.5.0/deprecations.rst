@@ -47,7 +47,7 @@ type. See their documentation for the types they expect.
 Discouraged: ``plot_date``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The use of `~.Axes.plot_date` is discouraged. This method exists for historic
+The use of ``plot_date`` is discouraged. This method exists for historic
 reasons and may be deprecated in the future.
 
 - ``datetime``-like data should directly be plotted using `~.Axes.plot`.
@@ -62,7 +62,7 @@ These methods convert from unix timestamps to matplotlib floats, but are not
 used internally to matplotlib, and should not be needed by end users. To
 convert a unix timestamp to datetime, simply use
 `datetime.datetime.utcfromtimestamp`, or to use NumPy `~numpy.datetime64`
-``dt = np.datetim64(e*1e6, 'us')``.
+``dt = np.datetime64(e*1e6, 'us')``.
 
 Auto-removal of grids by `~.Axes.pcolor` and `~.Axes.pcolormesh`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -162,7 +162,7 @@ implement a ``convert`` method that not only accepted instances of the unit,
 but also unitless values (which are passed through as is). This is no longer
 the case (``convert`` is never called with a unitless value), and such support
 in `.StrCategoryConverter` is deprecated. Likewise, the
-`.ConversionInterface.is_numlike` helper is deprecated.
+``.ConversionInterface.is_numlike`` helper is deprecated.
 
 Consider calling `.Axis.convert_units` instead, which still supports unitless
 values.
@@ -282,7 +282,7 @@ Miscellaneous deprecations
 - The *format* parameter of ``dviread.find_tex_file`` is deprecated (with no
   replacement).
 - ``FancyArrowPatch.get_path_in_displaycoord`` and
-  ``ConnectionPath.get_path_in_displaycoord`` are deprecated. The path in
+  ``ConnectionPatch.get_path_in_displaycoord`` are deprecated. The path in
   display coordinates can still be obtained, as for other patches, using
   ``patch.get_transform().transform_path(patch.get_path())``.
 - The ``font_manager.win32InstalledFonts`` and
@@ -353,7 +353,7 @@ is thus deprecated as well.
 To test an installed copy, be sure to specify both ``matplotlib`` and
 ``mpl_toolkits`` with ``--pyargs``::
 
-    python -m pytest --pyargs matplotlib.tests mpl_toolkits.tests
+    pytest --pyargs matplotlib.tests mpl_toolkits.tests
 
 See :ref:`testing` for more details.
 

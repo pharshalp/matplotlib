@@ -21,47 +21,51 @@ Still TODO:
 .. _Anti-Grain Geometry: http://agg.sourceforge.net/antigrain.com
 """
 
-try:
-    import threading
-except ImportError:
-    import dummy_threading as threading
+import logging
+from collections import namedtuple
 from contextlib import nullcontext
-from math import radians, cos, sin
+import math
 
 import numpy as np
-from PIL import Image
+from PIL import features
 
 import matplotlib as mpl
 from matplotlib import _api, cbook
-from matplotlib import colors as mcolors
+from matplotlib.artist import BlendMode
 from matplotlib.backend_bases import (
-    _Backend, FigureCanvasBase, FigureManagerBase, RendererBase)
-from matplotlib.font_manager import findfont, get_font
-from matplotlib.ft2font import (LOAD_FORCE_AUTOHINT, LOAD_NO_HINTING,
-                                LOAD_DEFAULT, LOAD_NO_AUTOHINT)
+    _Backend, FigureCanvasBase, FigureManagerBase, GraphicsContextBase, RendererBase)
+from matplotlib.dviread import Dvi
+from matplotlib.font_manager import fontManager as _fontManager, get_font
+from matplotlib.ft2font import LoadFlags, RenderMode, _render_glyph_run
 from matplotlib.mathtext import MathTextParser
 from matplotlib.path import Path
 from matplotlib.transforms import Bbox, BboxBase
 from matplotlib.backends._backend_agg import RendererAgg as _RendererAgg
 
 
-backend_version = 'v2.2'
+_log = logging.getLogger(__name__)
 
 
 def get_hinting_flag():
     mapping = {
-        'default': LOAD_DEFAULT,
-        'no_autohint': LOAD_NO_AUTOHINT,
-        'force_autohint': LOAD_FORCE_AUTOHINT,
-        'no_hinting': LOAD_NO_HINTING,
-        True: LOAD_FORCE_AUTOHINT,
-        False: LOAD_NO_HINTING,
-        'either': LOAD_DEFAULT,
-        'native': LOAD_NO_AUTOHINT,
-        'auto': LOAD_FORCE_AUTOHINT,
-        'none': LOAD_NO_HINTING,
+        'default': LoadFlags.DEFAULT,
+        'no_autohint': LoadFlags.NO_AUTOHINT,
+        'force_autohint': LoadFlags.FORCE_AUTOHINT,
+        'no_hinting': LoadFlags.NO_HINTING,
+        True: LoadFlags.FORCE_AUTOHINT,
+        False: LoadFlags.NO_HINTING,
+        'either': LoadFlags.DEFAULT,
+        'native': LoadFlags.NO_AUTOHINT,
+        'auto': LoadFlags.FORCE_AUTOHINT,
+        'none': LoadFlags.NO_HINTING,
     }
     return mapping[mpl.rcParams['text.hinting']]
+
+
+# Store group parameters as well as variables to restore after closing the group
+_GroupState = namedtuple(
+    '_GroupState', ['group_type', 'blend_mode', 'alpha', 'old_renderer', 'old_override']
+)
 
 
 class RendererAgg(RendererBase):
@@ -70,19 +74,6 @@ class RendererAgg(RendererBase):
     context instance that controls the colors/styles
     """
 
-    # we want to cache the fonts at the class level so that when
-    # multiple figures are created we can reuse them.  This helps with
-    # a bug on windows where the creation of too many figures leads to
-    # too many open file handles.  However, storing them at the class
-    # level is not thread safe.  The solution here is to let the
-    # FigureCanvas acquire a lock on the fontd at the start of the
-    # draw, and release it when it is done.  This allows multiple
-    # renderers to share the cached fonts, but only one figure can
-    # draw at time and so the font cache is used by only one
-    # renderer at a time.
-
-    lock = threading.RLock()
-
     def __init__(self, width, height, dpi):
         super().__init__()
 
@@ -90,10 +81,12 @@ class RendererAgg(RendererBase):
         self.width = width
         self.height = height
         self._renderer = _RendererAgg(int(width), int(height), dpi)
-        self._filter_renderers = []
+        self._group_states = []
+
+        self._override_blend_mode_to_knockout = False
 
         self._update_methods()
-        self.mathtext_parser = MathTextParser('Agg')
+        self.mathtext_parser = MathTextParser('path')
 
         self.bbox = Bbox.from_bounds(0, 0, self.width, self.height)
 
@@ -106,28 +99,14 @@ class RendererAgg(RendererBase):
         self.__init__(state['width'], state['height'], state['dpi'])
 
     def _update_methods(self):
-        self.draw_gouraud_triangle = self._renderer.draw_gouraud_triangle
-        self.draw_gouraud_triangles = self._renderer.draw_gouraud_triangles
         self.draw_image = self._renderer.draw_image
         self.draw_markers = self._renderer.draw_markers
         self.draw_path_collection = self._renderer.draw_path_collection
         self.draw_quad_mesh = self._renderer.draw_quad_mesh
         self.copy_from_bbox = self._renderer.copy_from_bbox
 
-    @_api.deprecated("3.4")
-    def get_content_extents(self):
-        orig_img = np.asarray(self.buffer_rgba())
-        slice_y, slice_x = cbook._get_nonzero_slices(orig_img[..., 3])
-        return (slice_x.start, slice_y.start,
-                slice_x.stop - slice_x.start, slice_y.stop - slice_y.start)
-
-    @_api.deprecated("3.4")
-    def tostring_rgba_minimized(self):
-        extents = self.get_content_extents()
-        bbox = [[extents[0], self.height - (extents[1] + extents[3])],
-                [extents[0] + extents[2], self.height - extents[1]]]
-        region = self.copy_from_bbox(bbox)
-        return np.array(region), extents
+    def new_gc(self):
+        return GraphicsContextAgg(self)
 
     def draw_path(self, gc, path, transform, rgbFace=None):
         # docstring inherited
@@ -152,7 +131,7 @@ class RendererAgg(RendererBase):
                 p.simplify_threshold = path.simplify_threshold
                 try:
                     self._renderer.draw_path(gc, p, transform, rgbFace)
-                except OverflowError as err:
+                except OverflowError:
                     msg = (
                         "Exceeded cell block limit in Agg.\n\n"
                         "Please reduce the value of "
@@ -167,12 +146,12 @@ class RendererAgg(RendererBase):
         else:
             try:
                 self._renderer.draw_path(gc, path, transform, rgbFace)
-            except OverflowError as err:
+            except OverflowError:
                 cant_chunk = ''
                 if rgbFace is not None:
-                    cant_chunk += "- can not split filled path\n"
+                    cant_chunk += "- cannot split filled path\n"
                 if gc.get_hatch() is not None:
-                    cant_chunk += "- can not split hatched path\n"
+                    cant_chunk += "- cannot split hatched path\n"
                 if not path.should_simplify:
                     cant_chunk += "- path.should_simplify is False\n"
                 if len(cant_chunk):
@@ -180,7 +159,7 @@ class RendererAgg(RendererBase):
                         "Exceeded cell block limit in Agg, however for the "
                         "following reasons:\n\n"
                         f"{cant_chunk}\n"
-                        "we can not automatically split up this path to draw."
+                        "we cannot automatically split up this path to draw."
                         "\n\nPlease manually simplify your path."
                     )
 
@@ -209,64 +188,77 @@ class RendererAgg(RendererBase):
 
                 raise OverflowError(msg) from None
 
+    def _draw_text_glyphs_and_boxes(self, gc, x, y, angle, glyphs, boxes):
+        # y is downwards.
+        antialiased = gc.get_antialiased()
+        buffer, positions = _render_glyph_run(
+            list(glyphs), self.dpi, x, y, angle, self.height, get_hinting_flag(),
+            RenderMode.NORMAL if antialiased else RenderMode.MONO)
+        self._renderer.draw_text_images(buffer, positions, gc)
+
+        rgba = gc.get_rgb()
+        if len(rgba) == 3 or gc.get_forced_alpha():
+            rgba = rgba[:3] + (gc.get_alpha(),)
+        gc1 = self.new_gc()
+        gc1.set_linewidth(0)
+        gc1.set_snap(gc.get_snap())
+        for dx, dy, w, h in boxes:  # dy is upwards.
+            if gc1.get_snap() in [None, True]:
+                # Prevent thin bars from disappearing by growing symmetrically.
+                if w < 1:
+                    dx -= (1 - w) / 2
+                    w = 1
+                if h < 1:
+                    dy -= (1 - h) / 2
+                    h = 1
+            path = Path._create_closed(
+                [(dx, dy), (dx + w, dy), (dx + w, dy + h), (dx, dy + h)])
+            self._renderer.draw_path(
+                gc1, path,
+                mpl.transforms.Affine2D()
+                .rotate_deg(angle).translate(x, self.height - y),
+                rgba)
+        gc1.restore()
+
     def draw_mathtext(self, gc, x, y, s, prop, angle):
         """Draw mathtext using :mod:`matplotlib.mathtext`."""
-        ox, oy, width, height, descent, font_image, used_characters = \
-            self.mathtext_parser.parse(s, self.dpi, prop)
-
-        xd = descent * sin(radians(angle))
-        yd = descent * cos(radians(angle))
-        x = round(x + ox + xd)
-        y = round(y - oy + yd)
-        self._renderer.draw_text_image(font_image, x, y + 1, angle, gc)
+        parse = self.mathtext_parser.parse(
+            s, self.dpi, prop, antialiased=gc.get_antialiased())
+        self._draw_text_glyphs_and_boxes(
+            gc, x, y, angle,
+            ((font, size, glyph_index, 0, 1, dx, dy)
+             for font, size, _char, glyph_index, dx, dy in parse.glyphs),
+            parse.rects)
 
     def draw_text(self, gc, x, y, s, prop, angle, ismath=False, mtext=None):
         # docstring inherited
-
         if ismath:
             return self.draw_mathtext(gc, x, y, s, prop, angle)
-
-        flags = get_hinting_flag()
-        font = self._get_agg_font(prop)
-
-        if font is None:
-            return None
-        # We pass '0' for angle here, since it will be rotated (in raster
-        # space) in the following call to draw_text_image).
-        font.set_text(s, 0, flags=flags)
-        font.draw_glyphs_to_bitmap(
-            antialiased=mpl.rcParams['text.antialiased'])
-        d = font.get_descent() / 64.0
-        # The descent needs to be adjusted for the angle.
-        xo, yo = font.get_bitmap_offset()
-        xo /= 64.0
-        yo /= 64.0
-        xd = d * sin(radians(angle))
-        yd = d * cos(radians(angle))
-        x = round(x + xo + xd)
-        y = round(y + yo + yd)
-        self._renderer.draw_text_image(font, x, y + 1, angle, gc)
+        font = self._prepare_font(prop)
+        items = font._layout(
+            s, flags=get_hinting_flag(),
+            features=mtext.get_fontfeatures() if mtext is not None else None,
+            language=mtext.get_language() if mtext is not None else None)
+        size = prop.get_size_in_points()
+        self._draw_text_glyphs_and_boxes(
+            gc, x, y, angle,
+            ((item.ft_object, size, item.glyph_index, 0, 1, item.x, item.y)
+             for item in items),
+            [])
 
     def get_text_width_height_descent(self, s, prop, ismath):
         # docstring inherited
 
         _api.check_in_list(["TeX", True, False], ismath=ismath)
         if ismath == "TeX":
-            # todo: handle props
-            texmanager = self.get_texmanager()
-            fontsize = prop.get_size_in_points()
-            w, h, d = texmanager.get_text_width_height_descent(
-                s, fontsize, renderer=self)
-            return w, h, d
+            return super().get_text_width_height_descent(s, prop, ismath)
 
         if ismath:
-            ox, oy, width, height, descent, fonts, used_characters = \
-                self.mathtext_parser.parse(s, self.dpi, prop)
-            return width, height, descent
+            parse = self.mathtext_parser.parse(s, self.dpi, prop)
+            return parse.width, parse.height, parse.depth
 
-        flags = get_hinting_flag()
-        font = self._get_agg_font(prop)
-        font.set_text(s, 0.0, flags=flags)
+        font = self._prepare_font(prop)
+        font.set_text(s, 0.0, flags=get_hinting_flag())
         w, h = font.get_width_height()  # width and height of unrotated string
         d = font.get_descent()
         w /= 64.0  # convert from subpixels
@@ -277,35 +269,55 @@ class RendererAgg(RendererBase):
     def draw_tex(self, gc, x, y, s, prop, angle, *, mtext=None):
         # docstring inherited
         # todo, handle props, angle, origins
+
         size = prop.get_size_in_points()
 
-        texmanager = self.get_texmanager()
+        if mpl.rcParams["text.latex.engine"] == "latex+dvipng":
+            Z = self.get_texmanager().get_grey(s, size, self.dpi)
+            Z = (Z * 0xff).astype(np.uint8)
+            w, h, d = self.get_text_width_height_descent(s, prop, ismath="TeX")
+            xd = d * math.sin(math.radians(angle))
+            yd = d * math.cos(math.radians(angle))
+            x = round(x + xd)
+            y = round(y + yd)
+            self._renderer.draw_text_image(Z, x, y, angle, gc)
+            return
 
-        Z = texmanager.get_grey(s, size, self.dpi)
-        Z = np.array(Z * 255.0, np.uint8)
+        dvifile = self.get_texmanager().make_dvi(s, size)
+        with Dvi(dvifile, self.dpi) as dvi:
+            page, = dvi
 
-        w, h, d = self.get_text_width_height_descent(s, prop, ismath="TeX")
-        xd = d * sin(radians(angle))
-        yd = d * cos(radians(angle))
-        x = round(x + xd)
-        y = round(y + yd)
-        self._renderer.draw_text_image(Z, x, y, angle, gc)
+        self._draw_text_glyphs_and_boxes(
+            gc, x, y, angle,
+            ((get_font(text.font_path), text.font_size, text.index,
+              text.font_effects.get('slant', 0), text.font_effects.get('extend', 1),
+              text.x, text.y)
+             for text in page.text),
+            ((box.x, box.y, box.width, box.height) for box in page.boxes))
+
+    def draw_gouraud_triangles(self, gc, triangles_array, colors_array, transform):
+        # docstring inherited
+        # The Gouraud triangles are rendered into an isolated buffer using the "plus"
+        # blend mode in order to get the colors of the edges and vertices correct.
+        # Afterwards, the isolated buffer is blended into the primary buffer using the
+        # specified blend mode.
+        self.open_blend_group(gc.get_blend_mode())
+        self._renderer._draw_gouraud_triangles(gc, triangles_array, colors_array,
+                                               transform)
+        self.close_blend_group()
 
     def get_canvas_width_height(self):
         # docstring inherited
         return self.width, self.height
 
-    def _get_agg_font(self, prop):
+    def _prepare_font(self, font_prop):
         """
-        Get the font for text instance t, caching for efficiency
+        Get the `.FT2Font` for *font_prop*, clear its buffer, and set its size.
         """
-        fname = findfont(prop)
-        font = get_font(fname)
-
+        font = get_font(_fontManager._find_fonts_by_props(font_prop))
         font.clear()
-        size = prop.get_size_in_points()
+        size = font_prop.get_size_in_points()
         font.set_size(size, self.dpi)
-
         return font
 
     def points_to_pixels(self, points):
@@ -317,9 +329,6 @@ class RendererAgg(RendererBase):
 
     def tostring_argb(self):
         return np.asarray(self._renderer).take([3, 0, 1, 2], axis=2).tobytes()
-
-    def tostring_rgb(self):
-        return np.asarray(self._renderer).take([0, 1, 2], axis=2).tobytes()
 
     def clear(self):
         self._renderer.clear()
@@ -373,17 +382,20 @@ class RendererAgg(RendererBase):
 
     def start_filter(self):
         """
-        Start filtering. It simply create a new canvas (the old one is saved).
+        Start filtering. It simply creates a new canvas (the old one is saved).
         """
-        self._filter_renderers.append(self._renderer)
+        self._group_states.append(
+            _GroupState("filter", None, None, self._renderer, None)
+        )
         self._renderer = _RendererAgg(int(self.width), int(self.height),
                                       self.dpi)
         self._update_methods()
 
-    def stop_filter(self, post_processing):
+    def stop_filter(self, post_processing, *, blend_mode="normal"):
         """
-        Save the plot in the current canvas as a image and apply
-        the *post_processing* function.
+        Save the current canvas as an image and apply post processing.
+
+        The *post_processing* function::
 
            def post_processing(image, dpi):
              # ny, nx, depth = image.shape
@@ -395,27 +407,92 @@ class RendererAgg(RendererBase):
              return new_image, offset_x, offset_y
 
         The saved renderer is restored and the returned image from
-        post_processing is plotted (using draw_image) on it.
+        post_processing is plotted (using draw_image) on it, using the blend
+        mode specified by ``blend_mode``.
         """
         orig_img = np.asarray(self.buffer_rgba())
         slice_y, slice_x = cbook._get_nonzero_slices(orig_img[..., 3])
         cropped_img = orig_img[slice_y, slice_x]
 
-        self._renderer = self._filter_renderers.pop()
+        group_state = self._group_states.pop()
+        self._renderer = group_state.old_renderer
+        if group_state.group_type != "filter":
+            raise RuntimeError("Cannot stop filtering because it includes a blend "
+                               "group that has not been closed.")
         self._update_methods()
 
         if cropped_img.size:
             img, ox, oy = post_processing(cropped_img / 255, self.dpi)
             gc = self.new_gc()
+            gc.set_blend_mode(blend_mode)
             if img.dtype.kind == 'f':
                 img = np.asarray(img * 255., np.uint8)
             self._renderer.draw_image(
                 gc, slice_x.start + ox, int(self.height) - slice_y.stop + oy,
                 img[::-1])
 
+    def open_blend_group(self, blend_mode, *, alpha=1, knockout=False):
+        # docstring inherited
+        if blend_mode is not None:
+            _api.check_in_list(BlendMode, blend_mode=blend_mode)
+        self._group_states.append(
+            _GroupState("blend", blend_mode, alpha, self._renderer,
+                        self._override_blend_mode_to_knockout)
+        )
+
+        if knockout and blend_mode is None:
+            _log.warning("A non-isolated blend group cannot also be a knockout blend "
+                         "group in the Agg backend.  Falling back to a non-knockout "
+                         "blend group.")
+            knockout = False
+
+        if blend_mode is not None:
+            self._renderer = _RendererAgg(int(self.width), int(self.height), self.dpi)
+            self._update_methods()
+            self._override_blend_mode_to_knockout = knockout
+
+    def close_blend_group(self):
+        # docstring inherited
+        group_state = self._group_states.pop()
+        self._override_blend_mode_to_knockout = group_state.old_override
+        if group_state.group_type != "blend":
+            raise RuntimeError("Cannot close the blend group because it includes a "
+                               "filter that has been started but not yet stopped.")
+
+        if group_state.blend_mode is not None:
+            orig_img = np.asarray(self.buffer_rgba())
+            slice_y, slice_x = cbook._get_nonzero_slices(orig_img[..., 3])
+            cropped_img = orig_img[slice_y, slice_x]
+
+            self._renderer = group_state.old_renderer
+            self._update_methods()
+
+            if cropped_img.size:
+                gc = self.new_gc()
+                gc.set_blend_mode(group_state.blend_mode)
+                gc.set_alpha(group_state.alpha)
+                self._renderer.draw_image(
+                    gc, slice_x.start, int(self.height) - slice_y.stop,
+                    cropped_img[::-1]
+                )
+
+
+class GraphicsContextAgg(GraphicsContextBase):
+    def __init__(self, renderer):
+        super().__init__()
+        self.renderer = renderer
+
+    def set_blend_mode(self, blend_mode):
+        if self.renderer._override_blend_mode_to_knockout:
+            super().set_blend_mode("knockout")
+        else:
+            super().set_blend_mode(blend_mode)
+
 
 class FigureCanvasAgg(FigureCanvasBase):
     # docstring inherited
+
+    _lastKey = None  # Overwritten per-instance on the first draw.
 
     def copy_from_bbox(self, bbox):
         renderer = self.get_renderer()
@@ -427,36 +504,24 @@ class FigureCanvasAgg(FigureCanvasBase):
 
     def draw(self):
         # docstring inherited
-        self.renderer = self.get_renderer(cleared=True)
+        self.renderer = self.get_renderer()
+        self.renderer.clear()
         # Acquire a lock on the shared font cache.
-        with RendererAgg.lock, \
-             (self.toolbar._wait_cursor_for_draw_cm() if self.toolbar
+        with (self.toolbar._wait_cursor_for_draw_cm() if self.toolbar
               else nullcontext()):
             self.figure.draw(self.renderer)
             # A GUI class may be need to update a window using this draw, so
             # don't forget to call the superclass.
             super().draw()
 
-    def get_renderer(self, cleared=False):
-        w, h = self.figure.bbox.size
+    def get_renderer(self):
+        w, h = self.get_width_height(physical=True)
         key = w, h, self.figure.dpi
-        reuse_renderer = (hasattr(self, "renderer")
-                          and getattr(self, "_lastKey", None) == key)
+        reuse_renderer = (self._lastKey == key)
         if not reuse_renderer:
             self.renderer = RendererAgg(w, h, self.figure.dpi)
             self._lastKey = key
-        elif cleared:
-            self.renderer.clear()
         return self.renderer
-
-    def tostring_rgb(self):
-        """
-        Get the image as RGB `bytes`.
-
-        `draw` must be called at least once before this function will work and
-        to update the renderer for any subsequent changes to the Figure.
-        """
-        return self.renderer.tostring_rgb()
 
     def tostring_argb(self):
         """
@@ -476,8 +541,9 @@ class FigureCanvasAgg(FigureCanvasBase):
         """
         return self.renderer.buffer_rgba()
 
-    @_api.delete_parameter("3.5", "args")
-    def print_raw(self, filename_or_obj, *args):
+    def print_raw(self, filename_or_obj, *, metadata=None):
+        if metadata is not None:
+            raise ValueError("metadata not supported for raw/rgba")
         FigureCanvasAgg.draw(self)
         renderer = self.get_renderer()
         with cbook.open_file_cm(filename_or_obj, "wb") as fh:
@@ -495,9 +561,7 @@ class FigureCanvasAgg(FigureCanvasBase):
             filename_or_obj, self.buffer_rgba(), format=fmt, origin="upper",
             dpi=self.figure.dpi, metadata=metadata, pil_kwargs=pil_kwargs)
 
-    @_api.delete_parameter("3.5", "args")
-    def print_png(self, filename_or_obj, *args,
-                  metadata=None, pil_kwargs=None):
+    def print_png(self, filename_or_obj, *, metadata=None, pil_kwargs=None):
         """
         Write the figure to a PNG file.
 
@@ -556,27 +620,39 @@ class FigureCanvasAgg(FigureCanvasBase):
     # print_figure(), and the latter ensures that `self.figure.dpi` already
     # matches the dpi kwarg (if any).
 
-    @_api.delete_parameter("3.5", "args")
-    def print_jpg(self, filename_or_obj, *args, pil_kwargs=None):
-        # Remove transparency by alpha-blending on an assumed white background.
-        r, g, b, a = mcolors.to_rgba(self.figure.get_facecolor())
-        try:
-            self.figure.set_facecolor(a * np.array([r, g, b]) + 1 - a)
-            self._print_pil(filename_or_obj, "jpeg", pil_kwargs)
-        finally:
-            self.figure.set_facecolor((r, g, b, a))
+    def print_gif(self, filename_or_obj, *, metadata=None, pil_kwargs=None):
+        self._print_pil(filename_or_obj, "gif", pil_kwargs, metadata)
+
+    def print_jpg(self, filename_or_obj, *, metadata=None, pil_kwargs=None):
+        # savefig() has already applied savefig.facecolor; we now set it to
+        # white to make imsave() blend semi-transparent figures against an
+        # assumed white background.
+        with mpl.rc_context({"savefig.facecolor": "white"}):
+            self._print_pil(filename_or_obj, "jpeg", pil_kwargs, metadata)
 
     print_jpeg = print_jpg
 
-    def print_tif(self, filename_or_obj, *, pil_kwargs=None):
-        self._print_pil(filename_or_obj, "tiff", pil_kwargs)
+    def print_tif(self, filename_or_obj, *, metadata=None, pil_kwargs=None):
+        self._print_pil(filename_or_obj, "tiff", pil_kwargs, metadata)
 
     print_tiff = print_tif
 
-    def print_webp(self, filename_or_obj, *, pil_kwargs=None):
-        self._print_pil(filename_or_obj, "webp", pil_kwargs)
+    def print_webp(self, filename_or_obj, *, metadata=None, pil_kwargs=None):
+        self._print_pil(filename_or_obj, "webp", pil_kwargs, metadata)
 
-    print_jpg.__doc__, print_tif.__doc__, print_webp.__doc__ = map(
+    def print_avif(self, filename_or_obj, *, metadata=None, pil_kwargs=None):
+        if not features.check("avif"):
+            raise RuntimeError(
+                "The installed pillow version does not support avif. Full "
+                "avif support has been added in pillow 11.3."
+            )
+        self._print_pil(filename_or_obj, "avif", pil_kwargs, metadata)
+
+    (print_gif.__doc__,
+     print_jpg.__doc__,
+     print_tif.__doc__,
+     print_webp.__doc__,
+     print_avif.__doc__) = map(
         """
         Write the figure to a {} file.
 
@@ -584,13 +660,17 @@ class FigureCanvasAgg(FigureCanvasBase):
         ----------
         filename_or_obj : str or path-like or file-like
             The file to write to.
+        metadata : None
+            Unused for pillow-based writers. All supported options
+            can be passed via *pil_kwargs*.
         pil_kwargs : dict, optional
             Additional keyword arguments that are passed to
             `PIL.Image.Image.save` when saving the figure.
-        """.format, ["JPEG", "TIFF", "WebP"])
+        """.format, ["GIF", "JPEG", "TIFF", "WebP", "AVIF"])
 
 
 @_Backend.export
 class _BackendAgg(_Backend):
+    backend_version = 'v2.2'
     FigureCanvas = FigureCanvasAgg
     FigureManager = FigureManagerBase

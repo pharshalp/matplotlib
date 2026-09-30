@@ -1,3 +1,4 @@
+---
 name: Documentation
 description: Create a report to help us improve the documentation
 title: "[Doc]: "
@@ -7,15 +8,15 @@ body:
     id: link
     attributes:
       label: Documentation Link
-      description: |
-        Link to any documentation or examples that you are referencing.
-        Suggested improvements should be based on the development version of the docs: https://matplotlib.org/devdocs/
+      description: >-
+        Link to any documentation or examples that you are referencing. Suggested improvements should be based
+        on [the development version of the docs](https://matplotlib.org/devdocs/)
       placeholder: https://matplotlib.org/devdocs/...
   - type: textarea
     id: problem
     attributes:
       label: Problem
-      description: What is missing, unclear, or wrong in the documentation? 
+      description: What is missing, unclear, or wrong in the documentation?
       placeholder: |
         * I found [...] to be unclear because [...]
         * [...] made me think that [...] when really it should be [...]
@@ -30,10 +31,3 @@ body:
         * This line should be be changed to say [...]
         * Include a paragraph explaining [...]
         * Add a figure showing [...]
-  - type: input
-    id: matplotlib-version
-    attributes:
-      label: Matplotlib Version
-      description: "From Python prompt: `import matplotlib; print(matplotlib.__version__)`"
-    validations:
-      required: true

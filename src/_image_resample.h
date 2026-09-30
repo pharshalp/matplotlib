@@ -3,10 +3,11 @@
 #ifndef MPL_RESAMPLE_H
 #define MPL_RESAMPLE_H
 
+#define MPL_DISABLE_AGG_GRAY_CLIPPING
+
 #include "agg_image_accessors.h"
 #include "agg_path_storage.h"
 #include "agg_pixfmt_gray.h"
-#include "agg_pixfmt_rgb.h"
 #include "agg_pixfmt_rgba.h"
 #include "agg_renderer_base.h"
 #include "agg_renderer_scanline.h"
@@ -59,20 +60,16 @@ namespace agg
         value_type a;
 
         //--------------------------------------------------------------------
-        gray64() {}
+        gray64() = default;
 
         //--------------------------------------------------------------------
-        explicit gray64(value_type v_, value_type a_ = 1) :
-        v(v_), a(a_) {}
+        explicit gray64(value_type v_, value_type a_ = 1) : v(v_), a(a_) {}
 
         //--------------------------------------------------------------------
-        gray64(const self_type& c, value_type a_) :
-            v(c.v), a(a_) {}
+        gray64(const self_type& c, value_type a_) : v(c.v), a(a_) {}
 
         //--------------------------------------------------------------------
-        gray64(const gray64& c) :
-            v(c.v),
-            a(c.a) {}
+        gray64(const gray64& c) = default;
 
         //--------------------------------------------------------------------
         static AGG_INLINE double to_double(value_type a)
@@ -245,7 +242,7 @@ namespace agg
         value_type a;
 
         //--------------------------------------------------------------------
-        rgba64() {}
+        rgba64() = default;
 
         //--------------------------------------------------------------------
         rgba64(value_type r_, value_type g_, value_type b_, value_type a_= 1) :
@@ -496,244 +493,51 @@ typedef enum {
     SINC,
     LANCZOS,
     BLACKMAN,
-    _n_interpolation
 } interpolation_e;
 
 
-template <typename T>
-class type_mapping;
+// T is rgba if and only if it has a T::r field.
+template<typename T, typename = void> struct is_grayscale : std::true_type {};
+template<typename T> struct is_grayscale<T, std::void_t<decltype(T::r)>> : std::false_type {};
+template<typename T> constexpr bool is_grayscale_v = is_grayscale<T>::value;
 
 
-template <> class type_mapping<agg::rgba8>
+template<typename color_type>
+struct type_mapping
 {
- public:
-    typedef agg::rgba8 color_type;
-    typedef fixed_blender_rgba_plain<color_type, agg::order_rgba> blender_type;
-    typedef fixed_blender_rgba_pre<color_type, agg::order_rgba> pre_blender_type;
-    typedef agg::pixfmt_alpha_blend_rgba<blender_type, agg::rendering_buffer> pixfmt_type;
-    typedef agg::pixfmt_alpha_blend_rgba<pre_blender_type, agg::rendering_buffer> pixfmt_pre_type;
-
-    template <typename A>
-    struct span_gen_affine_type
-    {
-        typedef agg::span_image_resample_rgba_affine<A> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_filter_type
-    {
-        typedef agg::span_image_filter_rgba<A, B> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_nn_type
-    {
-        typedef agg::span_image_filter_rgba_nn<A, B> type;
-    };
+    using blender_type = std::conditional_t<
+        is_grayscale_v<color_type>,
+        agg::blender_gray<color_type>,
+        std::conditional_t<
+            std::is_same_v<color_type, agg::rgba8>,
+            fixed_blender_rgba_plain<color_type, agg::order_rgba>,
+            agg::blender_rgba_pre<color_type, agg::order_rgba>
+        >
+    >;
+    using pixfmt_type = std::conditional_t<
+        is_grayscale_v<color_type>,
+        agg::pixfmt_alpha_blend_gray<blender_type, agg::rendering_buffer>,
+        agg::pixfmt_alpha_blend_rgba<blender_type, agg::rendering_buffer>
+    >;
+    template<typename A> using span_gen_affine_type = std::conditional_t<
+        is_grayscale_v<color_type>,
+        agg::span_image_resample_gray_affine<A>,
+        agg::span_image_resample_rgba_affine<A>
+    >;
+    template<typename A, typename B> using span_gen_filter_type = std::conditional_t<
+        is_grayscale_v<color_type>,
+        agg::span_image_filter_gray<A, B>,
+        agg::span_image_filter_rgba<A, B>
+    >;
+    template<typename A, typename B> using span_gen_nn_type = std::conditional_t<
+        is_grayscale_v<color_type>,
+        agg::span_image_filter_gray_nn<A, B>,
+        agg::span_image_filter_rgba_nn<A, B>
+    >;
 };
 
 
-template <> class type_mapping<agg::rgba16>
-{
- public:
-    typedef agg::rgba16 color_type;
-    typedef fixed_blender_rgba_plain<color_type, agg::order_rgba> blender_type;
-    typedef fixed_blender_rgba_pre<color_type, agg::order_rgba> pre_blender_type;
-    typedef agg::pixfmt_alpha_blend_rgba<blender_type, agg::rendering_buffer> pixfmt_type;
-    typedef agg::pixfmt_alpha_blend_rgba<pre_blender_type, agg::rendering_buffer> pixfmt_pre_type;
-
-    template <typename A>
-    struct span_gen_affine_type
-    {
-        typedef agg::span_image_resample_rgba_affine<A> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_filter_type
-    {
-        typedef agg::span_image_filter_rgba<A, B> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_nn_type
-    {
-        typedef agg::span_image_filter_rgba_nn<A, B> type;
-    };
-};
-
-
-template <> class type_mapping<agg::rgba32>
-{
- public:
-    typedef agg::rgba32 color_type;
-    typedef agg::blender_rgba_plain<color_type, agg::order_rgba> blender_type;
-    typedef agg::blender_rgba_pre<color_type, agg::order_rgba> pre_blender_type;
-    typedef agg::pixfmt_alpha_blend_rgba<blender_type, agg::rendering_buffer> pixfmt_type;
-    typedef agg::pixfmt_alpha_blend_rgba<pre_blender_type, agg::rendering_buffer> pixfmt_pre_type;
-
-    template <typename A>
-    struct span_gen_affine_type
-    {
-        typedef agg::span_image_resample_rgba_affine<A> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_filter_type
-    {
-        typedef agg::span_image_filter_rgba<A, B> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_nn_type
-    {
-        typedef agg::span_image_filter_rgba_nn<A, B> type;
-    };
-};
-
-
-template <> class type_mapping<agg::rgba64>
-{
- public:
-    typedef agg::rgba64 color_type;
-    typedef agg::blender_rgba_plain<color_type, agg::order_rgba> blender_type;
-    typedef agg::blender_rgba_pre<color_type, agg::order_rgba> pre_blender_type;
-    typedef agg::pixfmt_alpha_blend_rgba<blender_type, agg::rendering_buffer> pixfmt_type;
-    typedef agg::pixfmt_alpha_blend_rgba<pre_blender_type, agg::rendering_buffer> pixfmt_pre_type;
-
-    template <typename A>
-    struct span_gen_affine_type
-    {
-        typedef agg::span_image_resample_rgba_affine<A> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_filter_type
-    {
-        typedef agg::span_image_filter_rgba<A, B> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_nn_type
-    {
-        typedef agg::span_image_filter_rgba_nn<A, B> type;
-    };
-};
-
-
-template <> class type_mapping<double>
-{
- public:
-    typedef agg::gray64 color_type;
-    typedef agg::blender_gray<color_type> blender_type;
-    typedef agg::pixfmt_alpha_blend_gray<blender_type, agg::rendering_buffer> pixfmt_type;
-    typedef pixfmt_type pixfmt_pre_type;
-
-    template <typename A>
-    struct span_gen_affine_type
-    {
-        typedef agg::span_image_resample_gray_affine<A> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_filter_type
-    {
-        typedef agg::span_image_filter_gray<A, B> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_nn_type
-    {
-        typedef agg::span_image_filter_gray_nn<A, B> type;
-    };
-};
-
-
-template <> class type_mapping<float>
-{
- public:
-    typedef agg::gray32 color_type;
-    typedef agg::blender_gray<color_type> blender_type;
-    typedef agg::pixfmt_alpha_blend_gray<blender_type, agg::rendering_buffer> pixfmt_type;
-    typedef pixfmt_type pixfmt_pre_type;
-
-    template <typename A>
-    struct span_gen_affine_type
-    {
-        typedef agg::span_image_resample_gray_affine<A> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_filter_type
-    {
-        typedef agg::span_image_filter_gray<A, B> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_nn_type
-    {
-        typedef agg::span_image_filter_gray_nn<A, B> type;
-    };
-};
-
-
-template <> class type_mapping<unsigned short>
-{
- public:
-    typedef agg::gray16 color_type;
-    typedef agg::blender_gray<color_type> blender_type;
-    typedef agg::pixfmt_alpha_blend_gray<blender_type, agg::rendering_buffer> pixfmt_type;
-    typedef pixfmt_type pixfmt_pre_type;
-
-    template <typename A>
-    struct span_gen_affine_type
-    {
-        typedef agg::span_image_resample_gray_affine<A> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_filter_type
-    {
-        typedef agg::span_image_filter_gray<A, B> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_nn_type
-    {
-        typedef agg::span_image_filter_gray_nn<A, B> type;
-    };
-};
-
-
-template <> class type_mapping<unsigned char>
-{
- public:
-    typedef agg::gray8 color_type;
-    typedef agg::blender_gray<color_type> blender_type;
-    typedef agg::pixfmt_alpha_blend_gray<blender_type, agg::rendering_buffer> pixfmt_type;
-    typedef pixfmt_type pixfmt_pre_type;
-
-    template <typename A>
-    struct span_gen_affine_type
-    {
-        typedef agg::span_image_resample_gray_affine<A> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_filter_type
-    {
-        typedef agg::span_image_filter_gray<A, B> type;
-    };
-
-    template <typename A, typename B>
-    struct span_gen_nn_type
-    {
-        typedef agg::span_image_filter_gray_nn<A, B> type;
-    };
-};
-
-
-
-template<class color_type>
+template<typename color_type>
 class span_conv_alpha
 {
 public:
@@ -748,7 +552,8 @@ public:
     {
         if (m_alpha != 1.0) {
             do {
-                span->a *= m_alpha;
+                span->a = static_cast<typename color_type::value_type>(
+                    static_cast<typename color_type::calc_type>(span->a) * m_alpha);
                 ++span;
             } while (--len);
         }
@@ -764,23 +569,29 @@ class lookup_distortion
 {
 public:
     lookup_distortion(const double *mesh, int in_width, int in_height,
-                      int out_width, int out_height) :
+                      int out_width, int out_height, bool edge_aligned_subpixels) :
         m_mesh(mesh),
         m_in_width(in_width),
         m_in_height(in_height),
         m_out_width(out_width),
-        m_out_height(out_height)
+        m_out_height(out_height),
+        m_edge_aligned_subpixels(edge_aligned_subpixels)
     {}
 
     void calculate(int* x, int* y) {
         if (m_mesh) {
+            // Nearest-neighbor interpolation needs edge-aligned subpixels
+            // All other interpolation approaches need center-aligned subpixels
+            double offset = m_edge_aligned_subpixels ? 0 : 0.5;
+
             double dx = double(*x) / agg::image_subpixel_scale;
             double dy = double(*y) / agg::image_subpixel_scale;
             if (dx >= 0 && dx < m_out_width &&
                 dy >= 0 && dy < m_out_height) {
                 const double *coord = m_mesh + (int(dy) * m_out_width + int(dx)) * 2;
-                *x = int(coord[0] * agg::image_subpixel_scale);
-                *y = int(coord[1] * agg::image_subpixel_scale);
+                // Add a tiny fudge amount to account for numerical precision loss
+                *x = int(coord[0] * agg::image_subpixel_scale + offset + 1e-8);
+                *y = int(coord[1] * agg::image_subpixel_scale + offset + 1e-8);
             }
         }
     }
@@ -791,6 +602,7 @@ protected:
     int m_in_height;
     int m_out_width;
     int m_out_height;
+    bool m_edge_aligned_subpixels;
 };
 
 
@@ -811,7 +623,6 @@ static void get_filter(const resample_params_t &params,
 {
     switch (params.interpolation) {
     case NEAREST:
-    case _n_interpolation:
         // Never should get here.  Here to silence compiler warnings.
         break;
 
@@ -882,29 +693,39 @@ static void get_filter(const resample_params_t &params,
 }
 
 
-template<class T>
+template<typename renderer_t, typename rasterizer_t, typename span_gen_t>
+void render_image(renderer_t &renderer, rasterizer_t &rasterizer, span_gen_t &span_gen, double alpha)
+{
+    auto span_alloc = agg::span_allocator<typename renderer_t::color_type>{};
+    auto conv_alpha = span_conv_alpha<typename renderer_t::color_type>{alpha};
+    auto span_conv = agg::span_converter{span_gen, conv_alpha};
+
+    auto renderer_scanline = agg::renderer_scanline_aa{renderer, span_alloc, span_conv};
+
+    auto scanline = agg::scanline32_u8{};
+    agg::render_scanlines(rasterizer, scanline, renderer_scanline);
+}
+
+
+template<typename color_type>
 void resample(
-    const T *input, int in_width, int in_height,
-    T *output, int out_width, int out_height,
+    const void *input, int in_width, int in_height,
+    void *output, int out_width, int out_height,
     resample_params_t &params)
 {
-    typedef type_mapping<T> type_mapping_t;
+    using type_mapping_t = type_mapping<color_type>;
 
-    typedef typename type_mapping_t::pixfmt_type input_pixfmt_t;
-    typedef typename type_mapping_t::pixfmt_type output_pixfmt_t;
+    using input_pixfmt_t = typename type_mapping_t::pixfmt_type;
+    using output_pixfmt_t = typename type_mapping_t::pixfmt_type;
 
-    typedef agg::renderer_base<output_pixfmt_t> renderer_t;
-    typedef agg::rasterizer_scanline_aa<agg::rasterizer_sl_clip_dbl> rasterizer_t;
+    // Need to define this class explicitly because the first argument cannot be deduced
+    using arbitrary_interpolator_t =
+        agg::span_interpolator_adaptor<agg::span_interpolator_linear<>, lookup_distortion>;
 
-    typedef agg::wrap_mode_reflect reflect_t;
-    typedef agg::image_accessor_wrap<input_pixfmt_t, reflect_t, reflect_t> image_accessor_t;
-
-    typedef agg::span_allocator<typename type_mapping_t::color_type> span_alloc_t;
-    typedef span_conv_alpha<typename type_mapping_t::color_type> span_conv_alpha_t;
-
-    typedef agg::span_interpolator_linear<> affine_interpolator_t;
-    typedef agg::span_interpolator_adaptor<agg::span_interpolator_linear<>, lookup_distortion>
-        arbitrary_interpolator_t;
+    size_t itemsize = sizeof(color_type);
+    if (is_grayscale<color_type>::value) {
+        itemsize /= 2;  // agg::grayXX includes an alpha channel which we don't have.
+    }
 
     if (params.interpolation != NEAREST &&
         params.is_affine &&
@@ -915,38 +736,65 @@ void resample(
         params.interpolation = NEAREST;
     }
 
-    span_alloc_t span_alloc;
-    rasterizer_t rasterizer;
-    agg::scanline_u8 scanline;
-
-    span_conv_alpha_t conv_alpha(params.alpha);
-
     agg::rendering_buffer input_buffer;
-    input_buffer.attach((unsigned char *)input, in_width, in_height,
-                        in_width * sizeof(T));
+    input_buffer.attach(
+        (unsigned char *)input, in_width, in_height, in_width * itemsize);
     input_pixfmt_t input_pixfmt(input_buffer);
-    image_accessor_t input_accessor(input_pixfmt);
+    auto image_accessor_wrap =
+        agg::image_accessor_wrap<input_pixfmt_t, agg::wrap_mode_reflect, agg::wrap_mode_reflect>{input_pixfmt};
+    auto image_accessor_clip = agg::image_accessor_clip{input_pixfmt, color_type::no_color()};
 
     agg::rendering_buffer output_buffer;
-    output_buffer.attach((unsigned char *)output, out_width, out_height,
-                         out_width * sizeof(T));
+    output_buffer.attach(
+        (unsigned char *)output, out_width, out_height, out_width * itemsize);
     output_pixfmt_t output_pixfmt(output_buffer);
-    renderer_t renderer(output_pixfmt);
+    auto renderer = agg::renderer_base{output_pixfmt};
 
     agg::trans_affine inverted = params.affine;
     inverted.invert();
 
+    auto rasterizer = agg::rasterizer_scanline_aa<agg::rasterizer_sl_clip_dbl>{};
     rasterizer.clip_box(0, 0, out_width, out_height);
 
     agg::path_storage path;
-    if (params.is_affine) {
-        path.move_to(0, 0);
-        path.line_to(in_width, 0);
-        path.line_to(in_width, in_height);
-        path.line_to(0, in_height);
-        path.close_polygon();
-        agg::conv_transform<agg::path_storage> rectangle(path, params.affine);
-        rasterizer.add_path(rectangle);
+    if (params.is_affine && params.interpolation != NEAREST) {
+        if (params.affine.shx != 0 || params.affine.shy != 0) {
+            path.move_to(0, 0);
+            path.line_to(in_width, 0);
+            path.line_to(in_width, in_height);
+            path.line_to(0, in_height);
+            path.close_polygon();
+            agg::conv_transform<agg::path_storage> rectangle(path, params.affine);
+            rasterizer.add_path(rectangle);
+        } else {
+            // If there is no shear/rotation, bump out the rendering edges that are
+            // within a half pixel of a full pixel so that axes are visually filled.
+            // This bumping out is equivalent to treating any edge pixel that is at
+            // least half-covered by the source as fully covered by the source.
+            double left = 0;
+            double right = in_width;
+            double bottom = 0;
+            double top = in_height;
+            params.affine.transform(&left, &bottom);
+            params.affine.transform(&right, &top);
+            if (left > right) { std::swap(left, right); }
+            if (bottom > top) { std::swap(top, bottom); }
+            // Add a tiny fudge amount to account for numerical precision loss
+            int rleft = agg::iround(left - 1e-8);
+            int rright = agg::iround(right + 1e-8);
+            int rbottom = agg::iround(bottom - 1e-8);
+            int rtop = agg::iround(top + 1e-8);
+            if (rleft < left) { left = rleft; }
+            if (rright > right) { right = rright; }
+            if (rbottom < bottom) { bottom = rbottom; }
+            if (rtop > top) { top = rtop; }
+            path.move_to(left, bottom);
+            path.line_to(right, bottom);
+            path.line_to(right, top);
+            path.line_to(left, top);
+            path.close_polygon();
+            rasterizer.add_path(path);
+        }
     } else {
         path.move_to(0, 0);
         path.line_to(out_width, 0);
@@ -958,54 +806,42 @@ void resample(
 
     if (params.interpolation == NEAREST) {
         if (params.is_affine) {
-            typedef typename type_mapping_t::template span_gen_nn_type<image_accessor_t, affine_interpolator_t>::type span_gen_t;
-            typedef agg::span_converter<span_gen_t, span_conv_alpha_t> span_conv_t;
-            typedef agg::renderer_scanline_aa<renderer_t, span_alloc_t, span_conv_t> nn_renderer_t;
-
-            affine_interpolator_t interpolator(inverted);
-            span_gen_t span_gen(input_accessor, interpolator);
-            span_conv_t span_conv(span_gen, conv_alpha);
-            nn_renderer_t nn_renderer(renderer, span_alloc, span_conv);
-            agg::render_scanlines(rasterizer, scanline, nn_renderer);
+            auto interpolator = accurate_interpolator_affine_nn{inverted};
+            // C++17 cannot deduce arguments for an alias class template, so define the class explicitly
+            using span_gen_t = typename type_mapping_t::
+                template span_gen_nn_type<decltype(image_accessor_clip), decltype(interpolator)>;
+            auto span_gen = span_gen_t{image_accessor_clip, interpolator};
+            render_image(renderer, rasterizer, span_gen, params.alpha);
         } else {
-            typedef typename type_mapping_t::template span_gen_nn_type<image_accessor_t, arbitrary_interpolator_t>::type span_gen_t;
-            typedef agg::span_converter<span_gen_t, span_conv_alpha_t> span_conv_t;
-            typedef agg::renderer_scanline_aa<renderer_t, span_alloc_t, span_conv_t> nn_renderer_t;
-
             lookup_distortion dist(
-                params.transform_mesh, in_width, in_height, out_width, out_height);
-            arbitrary_interpolator_t interpolator(inverted, dist);
-            span_gen_t span_gen(input_accessor, interpolator);
-            span_conv_t span_conv(span_gen, conv_alpha);
-            nn_renderer_t nn_renderer(renderer, span_alloc, span_conv);
-            agg::render_scanlines(rasterizer, scanline, nn_renderer);
+                params.transform_mesh, in_width, in_height, out_width, out_height, true);
+            auto interpolator = arbitrary_interpolator_t{inverted, dist};
+            // C++17 cannot deduce arguments for an alias class template, so define the class explicitly
+            using span_gen_t = typename type_mapping_t::
+                template span_gen_nn_type<decltype(image_accessor_clip), decltype(interpolator)>;
+            auto span_gen = span_gen_t{image_accessor_clip, interpolator};
+            render_image(renderer, rasterizer, span_gen, params.alpha);
         }
     } else {
         agg::image_filter_lut filter;
         get_filter(params, filter);
 
         if (params.is_affine && params.resample) {
-            typedef typename type_mapping_t::template span_gen_affine_type<image_accessor_t>::type span_gen_t;
-            typedef agg::span_converter<span_gen_t, span_conv_alpha_t> span_conv_t;
-            typedef agg::renderer_scanline_aa<renderer_t, span_alloc_t, span_conv_t> int_renderer_t;
-
-            affine_interpolator_t interpolator(inverted);
-            span_gen_t span_gen(input_accessor, interpolator, filter);
-            span_conv_t span_conv(span_gen, conv_alpha);
-            int_renderer_t int_renderer(renderer, span_alloc, span_conv);
-            agg::render_scanlines(rasterizer, scanline, int_renderer);
+            auto interpolator = agg::span_interpolator_linear{inverted};
+            // C++17 cannot deduce arguments for an alias class template, so define the class explicitly
+            using span_gen_t = typename type_mapping_t::
+                template span_gen_affine_type<decltype(image_accessor_wrap)>;
+            auto span_gen = span_gen_t{image_accessor_wrap, interpolator, filter};
+            render_image(renderer, rasterizer, span_gen, params.alpha);
         } else {
-            typedef typename type_mapping_t::template span_gen_filter_type<image_accessor_t, arbitrary_interpolator_t>::type span_gen_t;
-            typedef agg::span_converter<span_gen_t, span_conv_alpha_t> span_conv_t;
-            typedef agg::renderer_scanline_aa<renderer_t, span_alloc_t, span_conv_t> int_renderer_t;
-
             lookup_distortion dist(
-                params.transform_mesh, in_width, in_height, out_width, out_height);
-            arbitrary_interpolator_t interpolator(inverted, dist);
-            span_gen_t span_gen(input_accessor, interpolator, filter);
-            span_conv_t span_conv(span_gen, conv_alpha);
-            int_renderer_t int_renderer(renderer, span_alloc, span_conv);
-            agg::render_scanlines(rasterizer, scanline, int_renderer);
+                params.transform_mesh, in_width, in_height, out_width, out_height, false);
+            auto interpolator = arbitrary_interpolator_t{inverted, dist};
+            // C++17 cannot deduce arguments for an alias class template, so define the class explicitly
+            using span_gen_t = typename type_mapping_t::
+                template span_gen_filter_type<decltype(image_accessor_wrap), decltype(interpolator)>;
+            auto span_gen = span_gen_t{image_accessor_wrap, interpolator, filter};
+            render_image(renderer, rasterizer, span_gen, params.alpha);
         }
     }
 }

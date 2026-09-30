@@ -15,8 +15,10 @@ directive in ``doc/topic/new-page.rst``::
 This creates in the build directory a file ``build/html/topic/old-page.html``
 that contains a relative refresh::
 
+    <!DOCTYPE html>
     <html>
       <head>
+        <meta charset="utf-8">
         <meta http-equiv="refresh" content="0; url=new-page.html">
       </head>
     </html>
@@ -31,15 +33,17 @@ full path::
 """
 
 from pathlib import Path
-from docutils.parsers.rst import Directive
+from sphinx.util.docutils import SphinxDirective
 from sphinx.domains import Domain
 from sphinx.util import logging
 
 logger = logging.getLogger(__name__)
 
 
-HTML_TEMPLATE = """<html>
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
   <head>
+    <meta charset="utf-8">
     <meta http-equiv="refresh" content="0; url={v}">
   </head>
 </html>
@@ -47,9 +51,9 @@ HTML_TEMPLATE = """<html>
 
 
 def setup(app):
-    RedirectFrom.app = app
     app.add_directive("redirect-from", RedirectFrom)
     app.add_domain(RedirectFromDomain)
+    app.connect("builder-inited", _clear_redirects)
     app.connect("build-finished", _generate_redirects)
 
     metadata = {'parallel_read_safe': True}
@@ -66,11 +70,11 @@ class RedirectFromDomain(Domain):
 
     @property
     def redirects(self):
-        """The mapping of the redirectes."""
+        """The mapping of the redirects."""
         return self.data.setdefault('redirects', {})
 
-    def clear_doc(self, docnames):
-        self.redirects.clear()
+    def clear_doc(self, docname):
+        self.redirects.pop(docname, None)
 
     def merge_domaindata(self, docnames, otherdata):
         for src, dst in otherdata['redirects'].items():
@@ -79,23 +83,26 @@ class RedirectFromDomain(Domain):
             elif self.redirects[src] != dst:
                 raise ValueError(
                     f"Inconsistent redirections from {src} to "
-                    F"{self.redirects[src]} and {otherdata.redirects[src]}")
+                    f"{self.redirects[src]} and {otherdata['redirects'][src]}")
 
 
-class RedirectFrom(Directive):
+class RedirectFrom(SphinxDirective):
     required_arguments = 1
 
     def run(self):
         redirected_doc, = self.arguments
-        env = self.app.env
-        builder = self.app.builder
-        domain = env.get_domain('redirect_from')
-        current_doc = env.path2doc(self.state.document.current_source)
-        redirected_reldoc, _ = env.relfn2path(redirected_doc, current_doc)
-        if redirected_reldoc in domain.redirects:
+        domain = self.env.get_domain('redirect_from')
+        current_doc = self.env.path2doc(self.state.document.current_source)
+        redirected_reldoc, _ = self.env.relfn2path(redirected_doc, current_doc)
+        if (
+            redirected_reldoc in domain.redirects
+            and domain.redirects[redirected_reldoc] != current_doc
+        ):
             raise ValueError(
                 f"{redirected_reldoc} is already noted as redirecting to "
-                f"{domain.redirects[redirected_reldoc]}")
+                f"{domain.redirects[redirected_reldoc]}\n"
+                f"Cannot also redirect it to {current_doc}"
+            )
         domain.redirects[redirected_reldoc] = current_doc
         return []
 
@@ -109,10 +116,17 @@ def _generate_redirects(app, exception):
         html = HTML_TEMPLATE.format(v=builder.get_relative_uri(k, v))
         if p.is_file():
             if p.read_text() != html:
-                logger.warning(f'A redirect-from directive is trying to '
-                               f'create {p}, but that file already exists '
-                               f'(perhaps you need to run "make clean")')
+                logger.warning('A redirect-from directive is trying to '
+                               'create %s, but that file already exists '
+                               '(perhaps you need to run "make clean")', p)
         else:
-            logger.info(f'making refresh html file: {k} redirect to {v}')
+            logger.info('making refresh html file: %s redirect to %s', k, v)
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(html)
+            p.write_text(html, encoding='utf-8')
+
+
+def _clear_redirects(app):
+    domain = app.env.get_domain('redirect_from')
+    if domain.redirects:
+        logger.info('clearing cached redirects')
+        domain.redirects.clear()

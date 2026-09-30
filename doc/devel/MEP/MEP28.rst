@@ -46,8 +46,8 @@ Detailed description
 
 Currently, the ``Axes.boxplot`` method accepts parameters that allow the
 users to specify medians and confidence intervals for each box that
-will be drawn in the plot. These were provided so that avdanced users
-could provide statistics computed in a different fashion that the simple
+will be drawn in the plot. These were provided so that advanced users
+could provide statistics computed in a different fashion than the simple
 method provided by matplotlib. However, handling this input requires
 complex logic to make sure that the forms of the data structure match what
 needs to be drawn. At the moment, that logic contains 9 separate if/else
@@ -80,14 +80,14 @@ the seaborn API to the underlying matplotlib functions.
 
 This will be achieved in the following way:
 
-  1. ``cbook.boxplot_stats`` will be modified to allow pre- and post-
-     computation transformation functions to be passed in (e.g., ``np.log``
-     and ``np.exp`` for lognormally distributed data)
-  2. ``Axes.boxplot`` will be modified to also accept and naïvely pass them
-     to ``cbook.boxplots_stats`` (Alt: pass the stat function and a dict
-     of its optional parameters).
-  3. Outdated parameters from ``Axes.boxplot`` will be deprecated and
-     later removed.
+1. ``cbook.boxplot_stats`` will be modified to allow pre- and post-
+   computation transformation functions to be passed in (e.g., ``np.log``
+   and ``np.exp`` for lognormally distributed data)
+2. ``Axes.boxplot`` will be modified to also accept and naïvely pass them
+   to ``cbook.boxplots_stats`` (Alt: pass the stat function and a dict
+   of its optional parameters).
+3. Outdated parameters from ``Axes.boxplot`` will be deprecated and
+   later removed.
 
 Importance
 ----------
@@ -101,7 +101,7 @@ boxplots will allow users to opt-out of that assumption if the
 data are known to not fit a normal distribution.
 
 Below is an example of how ``Axes.boxplot`` classifies outliers of lognormal
-data differently depending one these types of transforms.
+data differently depending on these types of transforms.
 
 .. plot::
    :include-source: true
@@ -164,9 +164,9 @@ and ``Axes.bxp``.
 
 The parameters to be deprecated and removed include:
 
-  1. ``usermedians`` - processed by 10 SLOC, 3 ``if`` blocks, a ``for`` loop
-  2. ``conf_intervals`` - handled by 15 SLOC, 6 ``if`` blocks, a ``for`` loop
-  3. ``sym`` - processed by 12 SLOC, 4 ``if`` blocks
+1. ``usermedians`` - processed by 10 SLOC, 3 ``if`` blocks, a ``for`` loop
+2. ``conf_intervals`` - handled by 15 SLOC, 6 ``if`` blocks, a ``for`` loop
+3. ``sym`` - processed by 12 SLOC, 4 ``if`` blocks
 
 Removing the ``sym`` option allows all code in handling the remaining
 styling parameters to be moved to ``Axes.bxp``. This doesn't remove
@@ -199,19 +199,20 @@ An accelerated timeline could look like the following:
 #. v2.0.1 add transforms to ``cbook.boxplots_stats``, expose in ``Axes.boxplot``
 #. v2.1.0 Initial Deprecations , and using 2D NumPy arrays as input
 
-    a. Using 2D NumPy arrays as input. The semantics around 2D arrays are generally confusing.
-    b. ``usermedians``, ``conf_intervals``, ``sym`` parameters
+   a. Using 2D NumPy arrays as input. The semantics around 2D arrays are generally confusing.
+   b. ``usermedians``, ``conf_intervals``, ``sym`` parameters
 
 #. v2.2.0
 
-    a. remove ``usermedians``, ``conf_intervals``, ``sym`` parameters
-    b. deprecate ``notch`` in favor of ``shownotches`` to be consistent with
-       other parameters and ``Axes.bxp``
+   a. remove ``usermedians``, ``conf_intervals``, ``sym`` parameters
+   b. deprecate ``notch`` in favor of ``shownotches`` to be consistent with
+      other parameters and ``Axes.bxp``
 
 #. v2.3.0
-    a. remove ``notch`` parameter
-    b. move all style and artist toggling logic to ``Axes.bxp`` such ``Axes.boxplot``
-       is little more than a broker between ``Axes.bxp`` and ``cbook.boxplots_stats``
+
+   a. remove ``notch`` parameter
+   b. move all style and artist toggling logic to ``Axes.bxp`` such ``Axes.boxplot``
+      is little more than a broker between ``Axes.bxp`` and ``cbook.boxplots_stats``
 
 
 Anticipated Impacts to Users
@@ -251,7 +252,7 @@ This MEP can be divided into a few loosely coupled components:
 #. Removing redundant statistical options in ``Axes.boxplot``
 #. Shifting all styling parameter processing from ``Axes.boxplot`` to ``Axes.bxp``.
 
-With this approach, #2 depends and #1, and #4 depends on #3.
+With this approach, #2 depends on #1, and #4 depends on #3.
 
 There are two possible approaches to #2. The first and most direct would
 be to mirror the new ``transform_in`` and ``transform_out`` parameters of
@@ -263,6 +264,7 @@ value of ``statfxn`` would be ``cbook.boxplot_stats``, but users could
 pass their own function. Then ``transform_in`` and ``transform_out`` would
 then be passed as elements of the ``statfxn_args`` parameter.
 
+.. rstcheck: ignore-next-code-block
 .. code:: python
 
    def boxplot_stats(data, ..., transform_in=None, transform_out=None):

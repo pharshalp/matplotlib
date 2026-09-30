@@ -34,7 +34,7 @@ Detailed description
 ====================
 
 Currently, the look and appearance of existing artist objects (figure,
-axes, Line2D etc...) can only be updated via ``set_`` and ``get_`` methods
+axes, Line2D, etc.) can only be updated via ``set_`` and ``get_`` methods
 on the artist object, which is quite laborious, especially if no
 reference to the artist(s) has been stored.  The new style sheets
 introduced in 1.4 allow styling before a plot is created, but do not
@@ -51,7 +51,7 @@ of primitives.
 The new methodology would require development of a number of steps:
 
 - A new stylesheet syntax (likely based on CSS) to allow selection of
-  artists by type, class, id etc...
+  artists by type, class, id, etc.
 - A mechanism by which to parse a stylesheet into a tree
 - A mechanism by which to translate the parse-tree into something
   which can be used to update the properties of relevant
@@ -67,7 +67,7 @@ Implementation
 
 It will be easiest to allow a '3rd party' to modify/set the style of an artist
 if the 'style' is created as a separate class and store against the artist as a
-property.  The `.GraphicsContextBase` class already provides a the basis of a
+property.  The `.GraphicsContextBase` class already provides the basis of a
 ``Style`` class and an artist's `~.Artist.draw` method can be refactored to use
 the ``Style`` class rather than setting up its own `.GraphicsContextBase` and
 transferring its style-related properties to it.  A minimal example of how this
@@ -137,7 +137,7 @@ initial development:
 Artist Type Selector
 
 
-Select an `.Artist` by it's type. E.g `.Line2D` or `.Text`::
+Select an `.Artist` by its type. E.g `.Line2D` or `.Text`::
 
     Line2D {attribute: value}
 

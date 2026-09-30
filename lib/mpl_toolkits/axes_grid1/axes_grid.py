@@ -1,5 +1,6 @@
 from numbers import Number
 import functools
+from types import MethodType
 
 import numpy as np
 
@@ -7,45 +8,17 @@ from matplotlib import _api, cbook
 from matplotlib.gridspec import SubplotSpec
 
 from .axes_divider import Size, SubplotDivider, Divider
-from .mpl_axes import Axes
-
-
-def _tick_only(ax, bottom_on, left_on):
-    bottom_off = not bottom_on
-    left_off = not left_on
-    ax.axis["bottom"].toggle(ticklabels=bottom_off, label=bottom_off)
-    ax.axis["left"].toggle(ticklabels=left_off, label=left_off)
+from .mpl_axes import Axes, SimpleAxisArtist
 
 
 class CbarAxesBase:
     def __init__(self, *args, orientation, **kwargs):
         self.orientation = orientation
-        self._default_label_on = True
-        self._locator = None  # deprecated.
         super().__init__(*args, **kwargs)
 
-    def colorbar(self, mappable, *, ticks=None, **kwargs):
-        orientation = (
-            "horizontal" if self.orientation in ["top", "bottom"] else
-            "vertical")
-        cb = self.figure.colorbar(mappable, cax=self, orientation=orientation,
-                                  ticks=ticks, **kwargs)
-        return cb
-
-    def toggle_label(self, b):
-        self._default_label_on = b
-        axis = self.axis[self.orientation]
-        axis.toggle(ticklabels=b, label=b)
-
-    def cla(self):
-        orientation = self.orientation
-        super().cla()
-        self.orientation = orientation
-
-
-@_api.deprecated("3.5")
-class CbarAxes(CbarAxesBase, Axes):
-    pass
+    def colorbar(self, mappable, **kwargs):
+        return self.get_figure(root=False).colorbar(
+            mappable, cax=self, location=self.orientation, **kwargs)
 
 
 _cbaraxes_class_factory = cbook._make_class_factory(CbarAxesBase, "Cbar{}")
@@ -55,19 +28,40 @@ class Grid:
     """
     A grid of Axes.
 
-    In Matplotlib, the axes location (and size) is specified in normalized
+    In Matplotlib, the Axes location (and size) is specified in normalized
     figure coordinates. This may not be ideal for images that needs to be
     displayed with a given aspect ratio; for example, it is difficult to
     display multiple images of a same size with some fixed padding between
     them.  AxesGrid can be used in such case.
+
+    Attributes
+    ----------
+    axes_all : list of Axes
+        A flat list of Axes. Note that you can also access this directly
+        from the grid. The following is equivalent ::
+
+            grid[i] == grid.axes_all[i]
+            len(grid) == len(grid.axes_all)
+
+    axes_column : list of list of Axes
+        A 2D list of Axes where the first index is the column. This results
+        in the usage pattern ``grid.axes_column[col][row]``.
+    axes_row : list of list of Axes
+        A 2D list of Axes where the first index is the row. This results
+        in the usage pattern ``grid.axes_row[row][col]``.
+    axes_llc : Axes
+        The Axes in the lower left corner.
+    n_axes : int
+        Number of Axes in the grid.
     """
 
     _defaultAxesClass = Axes
 
+    @_api.rename_parameter("3.11", "ngrids", "n_axes")
     def __init__(self, fig,
                  rect,
                  nrows_ncols,
-                 ngrids=None,
+                 n_axes=None,
                  direction="row",
                  axes_pad=0.02,
                  *,
@@ -83,13 +77,15 @@ class Grid:
         ----------
         fig : `.Figure`
             The parent figure.
-        rect : (float, float, float, float) or int
-            The axes position, as a ``(left, bottom, width, height)`` tuple or
-            as a three-digit subplot position code (e.g., "121").
+        rect : (float, float, float, float), (int, int, int), int, or \
+    `~.SubplotSpec`
+            The axes position, as a ``(left, bottom, width, height)`` tuple,
+            as a three-digit subplot position code (e.g., ``(1, 2, 1)`` or
+            ``121``), or as a `~.SubplotSpec`.
         nrows_ncols : (int, int)
             Number of rows and columns in the grid.
-        ngrids : int or None, default: None
-            If not None, only the first *ngrids* axes in the grid are created.
+        n_axes : int, optional
+            If given, only the first *n_axes* axes in the grid are created.
         direction : {"row", "column"}, default: "row"
             Whether axes are created in row-major ("row by row") or
             column-major order ("column by column").  This also affects the
@@ -104,28 +100,29 @@ class Grid:
             Whether all axes of a column share their x-axis.
         share_y : bool, default: True
             Whether all axes of a row share their y-axis.
-        label_mode : {"L", "1", "all"}, default: "L"
+        label_mode : {"L", "1", "all", "keep"}, default: "L"
             Determines which axes will get tick labels:
 
             - "L": All axes on the left column get vertical tick labels;
               all axes on the bottom row get horizontal tick labels.
             - "1": Only the bottom left axes is labelled.
-            - "all": all axes are labelled.
+            - "all": All axes are labelled.
+            - "keep": Do not do anything.
 
-        axes_class : subclass of `matplotlib.axes.Axes`, default: None
+        axes_class : subclass of `matplotlib.axes.Axes`, default: `.mpl_axes.Axes`
+            The type of Axes to create.
         aspect : bool, default: False
             Whether the axes aspect ratio follows the aspect ratio of the data
             limits.
         """
         self._nrows, self._ncols = nrows_ncols
 
-        if ngrids is None:
-            ngrids = self._nrows * self._ncols
+        if n_axes is None:
+            n_axes = self._nrows * self._ncols
         else:
-            if not 0 < ngrids <= self._nrows * self._ncols:
-                raise Exception("")
-
-        self.ngrids = ngrids
+            if not 0 < n_axes <= self._nrows * self._ncols:
+                raise ValueError(
+                    "n_axes must be positive and not larger than nrows*ncols")
 
         self._horiz_pad_size, self._vert_pad_size = map(
             Size.Fixed, np.broadcast_to(axes_pad, 2))
@@ -140,19 +137,19 @@ class Grid:
             axes_class = functools.partial(cls, **kwargs)
 
         kw = dict(horizontal=[], vertical=[], aspect=aspect)
-        if isinstance(rect, (str, Number, SubplotSpec)):
+        if isinstance(rect, (Number, SubplotSpec)):
             self._divider = SubplotDivider(fig, rect, **kw)
         elif len(rect) == 3:
             self._divider = SubplotDivider(fig, *rect, **kw)
         elif len(rect) == 4:
             self._divider = Divider(fig, rect, **kw)
         else:
-            raise Exception("")
+            raise TypeError("Incorrect rect format")
 
         rect = self._divider.get_position()
 
         axes_array = np.full((self._nrows, self._ncols), None, dtype=object)
-        for i in range(self.ngrids):
+        for i in range(n_axes):
             col, row = self._get_col_row(i)
             if share_all:
                 sharex = sharey = axes_array[0, 0]
@@ -162,9 +159,9 @@ class Grid:
             axes_array[row, col] = axes_class(
                 fig, rect, sharex=sharex, sharey=sharey)
         self.axes_all = axes_array.ravel(
-            order="C" if self._direction == "row" else "F").tolist()
-        self.axes_column = axes_array.T.tolist()
-        self.axes_row = axes_array.tolist()
+            order="C" if self._direction == "row" else "F").tolist()[:n_axes]
+        self.axes_row = [[ax for ax in row if ax] for row in axes_array]
+        self.axes_column = [[ax for ax in col if ax] for col in axes_array.T]
         self.axes_llc = self.axes_column[0][-1]
 
         self._init_locators()
@@ -175,33 +172,14 @@ class Grid:
         self.set_label_mode(label_mode)
 
     def _init_locators(self):
-
-        h = []
-        h_ax_pos = []
-        for _ in range(self._ncols):
-            if h:
-                h.append(self._horiz_pad_size)
-            h_ax_pos.append(len(h))
-            sz = Size.Scaled(1)
-            h.append(sz)
-
-        v = []
-        v_ax_pos = []
-        for _ in range(self._nrows):
-            if v:
-                v.append(self._vert_pad_size)
-            v_ax_pos.append(len(v))
-            sz = Size.Scaled(1)
-            v.append(sz)
-
-        for i in range(self.ngrids):
+        self._divider.set_horizontal(
+            [Size.Scaled(1), self._horiz_pad_size] * (self._ncols-1) + [Size.Scaled(1)])
+        self._divider.set_vertical(
+            [Size.Scaled(1), self._vert_pad_size] * (self._nrows-1) + [Size.Scaled(1)])
+        for i in range(self.n_axes):
             col, row = self._get_col_row(i)
-            locator = self._divider.new_locator(
-                nx=h_ax_pos[col], ny=v_ax_pos[self._nrows - 1 - row])
-            self.axes_all[i].set_axes_locator(locator)
-
-        self._divider.set_horizontal(h)
-        self._divider.set_vertical(v)
+            self.axes_all[i].set_axes_locator(
+                self._divider.new_locator(nx=2 * col, ny=2 * (self._nrows - 1 - row)))
 
     def _get_col_row(self, n):
         if self._direction == "column":
@@ -210,6 +188,9 @@ class Grid:
             row, col = divmod(n, self._ncols)
 
         return col, row
+
+    n_axes = property(lambda self: len(self.axes_all))
+    ngrids = _api.deprecated('3.11')(property(lambda self: len(self.axes_all)))
 
     # Good to propagate __len__ if we have __getitem__
     def __len__(self):
@@ -262,40 +243,37 @@ class Grid:
 
         Parameters
         ----------
-        mode : {"L", "1", "all"}
+        mode : {"L", "1", "all", "keep"}
             The label mode:
 
             - "L": All axes on the left column get vertical tick labels;
               all axes on the bottom row get horizontal tick labels.
             - "1": Only the bottom left axes is labelled.
-            - "all": all axes are labelled.
+            - "all": All axes are labelled.
+            - "keep": Do not do anything.
         """
-        if mode == "all":
-            for ax in self.axes_all:
-                _tick_only(ax, False, False)
-        elif mode == "L":
-            # left-most axes
-            for ax in self.axes_column[0][:-1]:
-                _tick_only(ax, bottom_on=True, left_on=False)
-            # lower-left axes
-            ax = self.axes_column[0][-1]
-            _tick_only(ax, bottom_on=False, left_on=False)
-
-            for col in self.axes_column[1:]:
-                # axes with no labels
-                for ax in col[:-1]:
-                    _tick_only(ax, bottom_on=True, left_on=True)
-
-                # bottom
-                ax = col[-1]
-                _tick_only(ax, bottom_on=False, left_on=True)
-
-        elif mode == "1":
-            for ax in self.axes_all:
-                _tick_only(ax, bottom_on=True, left_on=True)
-
-            ax = self.axes_llc
-            _tick_only(ax, bottom_on=False, left_on=False)
+        _api.check_in_list(["all", "L", "1", "keep"], mode=mode)
+        if mode == "keep":
+            return
+        for i, j in np.ndindex(self._nrows, self._ncols):
+            try:
+                ax = self.axes_row[i][j]
+            except IndexError:
+                continue
+            if isinstance(ax.axis, MethodType):
+                bottom_axis = SimpleAxisArtist(ax.xaxis, 1, ax.spines["bottom"])
+                left_axis = SimpleAxisArtist(ax.yaxis, 1, ax.spines["left"])
+            else:
+                bottom_axis = ax.axis["bottom"]
+                left_axis = ax.axis["left"]
+            display_at_bottom = (i == self._nrows - 1 if mode == "L" else
+                                 i == self._nrows - 1 and j == 0 if mode == "1" else
+                                 True)  # if mode == "all"
+            display_at_left = (j == 0 if mode == "L" else
+                               i == self._nrows - 1 and j == 0 if mode == "1" else
+                               True)  # if mode == "all"
+            bottom_axis.toggle(ticklabels=display_at_bottom, label=display_at_bottom)
+            left_axis.toggle(ticklabels=display_at_left, label=display_at_left)
 
     def get_divider(self):
         return self._divider
@@ -306,18 +284,21 @@ class Grid:
     def get_axes_locator(self):
         return self._divider.get_locator()
 
-    @_api.deprecated("3.5")
-    def get_vsize_hsize(self):
-        return self._divider.get_vsize_hsize()
-
 
 class ImageGrid(Grid):
-    # docstring inherited
+    """
+    A grid of Axes for Image display.
+
+    This class is a specialization of `~.axes_grid1.axes_grid.Grid` for displaying a
+    grid of images.  In particular, it forces all axes in a column to share their x-axis
+    and all axes in a row to share their y-axis.  It further provides helpers to add
+    colorbars to some or all axes.
+    """
 
     def __init__(self, fig,
                  rect,
                  nrows_ncols,
-                 ngrids=None,
+                 n_axes=None,
                  direction="row",
                  axes_pad=0.02,
                  *,
@@ -341,8 +322,8 @@ class ImageGrid(Grid):
             as a three-digit subplot position code (e.g., "121").
         nrows_ncols : (int, int)
             Number of rows and columns in the grid.
-        ngrids : int or None, default: None
-            If not None, only the first *ngrids* axes in the grid are created.
+        n_axes : int, optional
+            If given, only the first *n_axes* axes in the grid are created.
         direction : {"row", "column"}, default: "row"
             Whether axes are created in row-major ("row by row") or
             column-major order ("column by column").  This also affects the
@@ -351,7 +332,9 @@ class ImageGrid(Grid):
             Padding or (horizontal padding, vertical padding) between axes, in
             inches.
         share_all : bool, default: False
-            Whether all axes share their x- and y-axis.
+            Whether all axes share their x- and y-axis.  Note that in any case,
+            all axes in a column share their x-axis and all axes in a row share
+            their y-axis.
         aspect : bool, default: True
             Whether the axes aspect ratio follows the aspect ratio of the data
             limits.
@@ -367,17 +350,26 @@ class ImageGrid(Grid):
             Whether to create a colorbar for "each" axes, a "single" colorbar
             for the entire grid, colorbars only for axes on the "edge"
             determined by *cbar_location*, or no colorbars.  The colorbars are
-            stored in the :attr:`cbar_axes` attribute.
+            stored in the :attr:`!cbar_axes` attribute.
         cbar_location : {"left", "right", "bottom", "top"}, default: "right"
         cbar_pad : float, default: None
             Padding between the image axes and the colorbar axes.
-        cbar_size : size specification (see `.Size.from_any`), default: "5%"
+
+            .. versionchanged:: 3.10
+                ``cbar_mode="single"`` no longer adds *axes_pad* between the axes
+                and the colorbar if the *cbar_location* is "left" or "bottom".
+
+        cbar_size : size specification (see `!.Size.from_any`), default: "5%"
             Colorbar size.
         cbar_set_cax : bool, default: True
             If True, each axes in the grid has a *cax* attribute that is bound
             to associated *cbar_axes*.
-        axes_class : subclass of `matplotlib.axes.Axes`, default: None
+        axes_class : subclass of `matplotlib.axes.Axes`, default: `.mpl_axes.Axes`
         """
+        _api.check_in_list(["each", "single", "edge", None],
+                           cbar_mode=cbar_mode)
+        _api.check_in_list(["left", "right", "bottom", "top"],
+                           cbar_location=cbar_location)
         self._colorbar_mode = cbar_mode
         self._colorbar_location = cbar_location
         self._colorbar_pad = cbar_pad
@@ -385,7 +377,7 @@ class ImageGrid(Grid):
         # The colorbar axes are created in _init_locators().
 
         super().__init__(
-            fig, rect, nrows_ncols, ngrids,
+            fig, rect, nrows_ncols, n_axes,
             direction=direction, axes_pad=axes_pad,
             share_all=share_all, share_x=True, share_y=True, aspect=aspect,
             label_mode=label_mode, axes_class=axes_class)
@@ -419,9 +411,9 @@ class ImageGrid(Grid):
                 self._colorbar_pad = self._vert_pad_size.fixed_size
         self.cbar_axes = [
             _cbaraxes_class_factory(self._defaultAxesClass)(
-                self.axes_all[0].figure, self._divider.get_position(),
+                self.axes_all[0].get_figure(root=False), self._divider.get_position(),
                 orientation=self._colorbar_location)
-            for _ in range(self.ngrids)]
+            for _ in range(self.n_axes)]
 
         cb_mode = self._colorbar_mode
         cb_location = self._colorbar_location
@@ -442,13 +434,13 @@ class ImageGrid(Grid):
                 v.append(Size.from_any(self._colorbar_size, sz))
                 v.append(Size.from_any(self._colorbar_pad, sz))
                 locator = self._divider.new_locator(nx=0, nx1=-1, ny=0)
-            for i in range(self.ngrids):
+            for i in range(self.n_axes):
                 self.cbar_axes[i].set_visible(False)
             self.cbar_axes[0].set_axes_locator(locator)
             self.cbar_axes[0].set_visible(True)
 
         for col, ax in enumerate(self.axes_row[0]):
-            if h:
+            if col != 0:
                 h.append(self._horiz_pad_size)
 
             if ax:
@@ -477,7 +469,7 @@ class ImageGrid(Grid):
         v_ax_pos = []
         v_cb_pos = []
         for row, ax in enumerate(self.axes_column[0][::-1]):
-            if v:
+            if row != 0:
                 v.append(self._vert_pad_size)
 
             if ax:
@@ -503,7 +495,7 @@ class ImageGrid(Grid):
                 v_cb_pos.append(len(v))
                 v.append(Size.from_any(self._colorbar_size, sz))
 
-        for i in range(self.ngrids):
+        for i in range(self.n_axes):
             col, row = self._get_col_row(i)
             locator = self._divider.new_locator(nx=h_ax_pos[col],
                                                 ny=v_ax_pos[self._nrows-1-row])
@@ -543,12 +535,12 @@ class ImageGrid(Grid):
                 v.append(Size.from_any(self._colorbar_size, sz))
                 locator = self._divider.new_locator(nx=0, nx1=-1, ny=-2)
             if cb_location in ("right", "top"):
-                for i in range(self.ngrids):
+                for i in range(self.n_axes):
                     self.cbar_axes[i].set_visible(False)
                 self.cbar_axes[0].set_axes_locator(locator)
                 self.cbar_axes[0].set_visible(True)
         elif cb_mode == "each":
-            for i in range(self.ngrids):
+            for i in range(self.n_axes):
                 self.cbar_axes[i].set_visible(True)
         elif cb_mode == "edge":
             if cb_location in ("right", "left"):
@@ -557,10 +549,10 @@ class ImageGrid(Grid):
                 count = self._ncols
             for i in range(count):
                 self.cbar_axes[i].set_visible(True)
-            for j in range(i + 1, self.ngrids):
+            for j in range(i + 1, self.n_axes):
                 self.cbar_axes[j].set_visible(False)
         else:
-            for i in range(self.ngrids):
+            for i in range(self.n_axes):
                 self.cbar_axes[i].set_visible(False)
                 self.cbar_axes[i].set_position([1., 1., 0.001, 0.001],
                                                which="active")

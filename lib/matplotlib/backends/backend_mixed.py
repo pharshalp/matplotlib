@@ -1,7 +1,7 @@
 import numpy as np
 
 from matplotlib import cbook
-from matplotlib.backends.backend_agg import RendererAgg
+from .backend_agg import RendererAgg
 from matplotlib._tight_bbox import process_figure_for_rasterizing
 
 
@@ -19,19 +19,19 @@ class MixedModeRenderer:
         """
         Parameters
         ----------
-        figure : `matplotlib.figure.Figure`
+        figure : `~matplotlib.figure.Figure`
             The figure instance.
-        width : scalar
+        width : float
             The width of the canvas in logical units
-        height : scalar
+        height : float
             The height of the canvas in logical units
         dpi : float
             The dpi of the canvas
-        vector_renderer : `matplotlib.backend_bases.RendererBase`
+        vector_renderer : `~matplotlib.backend_bases.RendererBase`
             An instance of a subclass of
             `~matplotlib.backend_bases.RendererBase` that will be used for the
             vector drawing.
-        raster_renderer_class : `matplotlib.backend_bases.RendererBase`
+        raster_renderer_class : `~matplotlib.backend_bases.RendererBase`
             The renderer class to use for the raster drawing.  If not provided,
             this will use the Agg backend (which is currently the only viable
             option anyway.)
@@ -53,7 +53,7 @@ class MixedModeRenderer:
         # the figure dpi before and after the rasterization. Although
         # this looks ugly, I couldn't find a better solution. -JJL
         self.figure = figure
-        self._figdpi = figure.get_dpi()
+        self._figdpi = figure.dpi
 
         self._bbox_inches_restore = bbox_inches_restore
 
@@ -68,21 +68,31 @@ class MixedModeRenderer:
         # to the underlying C implementation).
         return getattr(self._renderer, attr)
 
+    def close_blend_group(self):
+        # docstring inherited
+        # If rasterizing can be stopped, stop it before closing the group
+        if self._raster_depth == 0 and self._rasterizing:
+            self.stop_rasterizing()
+            self._rasterizing = False
+        self._renderer.close_blend_group()
+
     def start_rasterizing(self):
         """
         Enter "raster" mode.  All subsequent drawing commands (until
         `stop_rasterizing` is called) will be drawn with the raster backend.
         """
         # change the dpi of the figure temporarily.
-        self.figure.set_dpi(self.dpi)
-        if self._bbox_inches_restore:  # when tight bbox is used
-            r = process_figure_for_rasterizing(self.figure,
-                                               self._bbox_inches_restore)
-            self._bbox_inches_restore = r
+        self.figure.dpi = self.dpi
 
         self._raster_renderer = self._raster_renderer_class(
             self._width*self.dpi, self._height*self.dpi, self.dpi)
         self._renderer = self._raster_renderer
+
+        if self._bbox_inches_restore:  # when tight bbox is used
+            r = process_figure_for_rasterizing(self.figure,
+                                               self._bbox_inches_restore,
+                                               self._raster_renderer)
+            self._bbox_inches_restore = r
 
     def stop_rasterizing(self):
         """
@@ -110,10 +120,11 @@ class MixedModeRenderer:
         self._raster_renderer = None
 
         # restore the figure dpi.
-        self.figure.set_dpi(self._figdpi)
+        self.figure.dpi = self._figdpi
 
         if self._bbox_inches_restore:  # when tight bbox is used
             r = process_figure_for_rasterizing(self.figure,
                                                self._bbox_inches_restore,
+                                               self._vector_renderer,
                                                self._figdpi)
             self._bbox_inches_restore = r

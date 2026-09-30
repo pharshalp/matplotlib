@@ -9,24 +9,28 @@ This backend depends on cairocffi or pycairo.
 import functools
 import gzip
 import math
+import logging
+from collections import namedtuple
 
 import numpy as np
 
 try:
     import cairo
-    if cairo.version_info < (1, 11, 0):
-        # Introduced create_for_data for Py3.
-        raise ImportError
+    if cairo.version_info < (1, 14, 0):  # Introduced set_device_scale.
+        raise ImportError(f"Cairo backend requires cairo>=1.14.0, "
+                          f"but only {cairo.version_info} is available")
 except ImportError:
     try:
         import cairocffi as cairo
     except ImportError as err:
         raise ImportError(
-            "cairo backend requires that pycairo>=1.11.0 or cairocffi "
+            "cairo backend requires that pycairo>=1.14.0 or cairocffi "
             "is installed") from err
+    except OSError as err:
+        raise ImportError("cairocffi could not load cairo") from err
 
-import matplotlib as mpl
 from .. import _api, cbook, font_manager
+from matplotlib.artist import BlendMode
 from matplotlib.backend_bases import (
     _Backend, FigureCanvasBase, FigureManagerBase, GraphicsContextBase,
     RendererBase)
@@ -35,23 +39,14 @@ from matplotlib.path import Path
 from matplotlib.transforms import Affine2D
 
 
-backend_version = cairo.version
+_log = logging.getLogger(__name__)
 
 
-if cairo.__name__ == "cairocffi":
-    # Convert a pycairo context to a cairocffi one.
-    def _to_context(ctx):
-        if not isinstance(ctx, cairo.Context):
-            ctx = cairo.Context._from_pointer(
-                cairo.ffi.cast(
-                    'cairo_t **',
-                    id(ctx) + object.__basicsize__)[0],
-                incref=True)
-        return ctx
-else:
-    # Pass-through a pycairo context.
-    def _to_context(ctx):
-        return ctx
+def _set_rgba(ctx, color, alpha, forced_alpha):
+    if len(color) == 3 or forced_alpha:
+        ctx.set_source_rgba(*color[:3], alpha)
+    else:
+        ctx.set_source_rgba(*color)
 
 
 def _append_path(ctx, path, transform, clip=None):
@@ -92,33 +87,10 @@ def _cairo_font_args_from_font_prop(prop):
     return name, slant, weight
 
 
-# Mappings used for deprecated properties in RendererCairo, see below.
-_f_weights = {
-    100:          cairo.FONT_WEIGHT_NORMAL,
-    200:          cairo.FONT_WEIGHT_NORMAL,
-    300:          cairo.FONT_WEIGHT_NORMAL,
-    400:          cairo.FONT_WEIGHT_NORMAL,
-    500:          cairo.FONT_WEIGHT_NORMAL,
-    600:          cairo.FONT_WEIGHT_BOLD,
-    700:          cairo.FONT_WEIGHT_BOLD,
-    800:          cairo.FONT_WEIGHT_BOLD,
-    900:          cairo.FONT_WEIGHT_BOLD,
-    'ultralight': cairo.FONT_WEIGHT_NORMAL,
-    'light':      cairo.FONT_WEIGHT_NORMAL,
-    'normal':     cairo.FONT_WEIGHT_NORMAL,
-    'medium':     cairo.FONT_WEIGHT_NORMAL,
-    'regular':    cairo.FONT_WEIGHT_NORMAL,
-    'semibold':   cairo.FONT_WEIGHT_BOLD,
-    'bold':       cairo.FONT_WEIGHT_BOLD,
-    'heavy':      cairo.FONT_WEIGHT_BOLD,
-    'ultrabold':  cairo.FONT_WEIGHT_BOLD,
-    'black':      cairo.FONT_WEIGHT_BOLD,
-}
-_f_angles = {
-    'italic':  cairo.FONT_SLANT_ITALIC,
-    'normal':  cairo.FONT_SLANT_NORMAL,
-    'oblique': cairo.FONT_SLANT_OBLIQUE,
-}
+# Store group parameters as well as a variable to restore after closing the group
+_GroupState = namedtuple(
+    '_GroupState', ['blend_mode', 'alpha', 'old_override']
+)
 
 
 class RendererCairo(RendererBase):
@@ -129,29 +101,34 @@ class RendererCairo(RendererBase):
         self.height = None
         self.text_ctx = cairo.Context(
            cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+        self._group_states = []
         super().__init__()
 
+        self._override_blend_mode_to_knockout = False
+
     def set_context(self, ctx):
-        self.gc.ctx = _to_context(ctx)
+        surface = ctx.get_target()
+        if hasattr(surface, "get_width") and hasattr(surface, "get_height"):
+            size = surface.get_width(), surface.get_height()
+        elif hasattr(surface, "get_extents"):  # GTK4 RecordingSurface.
+            ext = surface.get_extents()
+            size = ext.width, ext.height
+        else:  # vector surfaces.
+            ctx.save()
+            ctx.reset_clip()
+            rect, *rest = ctx.copy_clip_rectangle_list()
+            if rest:
+                raise TypeError("Cannot infer surface size")
+            _, _, *size = rect
+            ctx.restore()
+        self.gc.ctx = ctx
+        self.width, self.height = size
 
-    def set_ctx_from_surface(self, surface):
-        self.gc.ctx = cairo.Context(surface)
-        # Although it may appear natural to automatically call
-        # `self.set_width_height(surface.get_width(), surface.get_height())`
-        # here (instead of having the caller do so separately), this would fail
-        # for PDF/PS/SVG surfaces, which have no way to report their extents.
-
-    def set_width_height(self, width, height):
-        self.width = width
-        self.height = height
-
-    def _fill_and_stroke(self, ctx, fill_c, alpha, alpha_overrides):
+    @staticmethod
+    def _fill_and_stroke(ctx, fill_c, alpha, alpha_overrides):
         if fill_c is not None:
             ctx.save()
-            if len(fill_c) == 3 or alpha_overrides:
-                ctx.set_source_rgba(fill_c[0], fill_c[1], fill_c[2], alpha)
-            else:
-                ctx.set_source_rgba(fill_c[0], fill_c[1], fill_c[2], fill_c[3])
+            _set_rgba(ctx, fill_c, alpha, alpha_overrides)
             ctx.fill_preserve()
             ctx.restore()
         ctx.stroke()
@@ -167,8 +144,31 @@ class RendererCairo(RendererBase):
                      + Affine2D().scale(1, -1).translate(0, self.height))
         ctx.new_path()
         _append_path(ctx, path, transform, clip)
-        self._fill_and_stroke(
-            ctx, rgbFace, gc.get_alpha(), gc.get_forced_alpha())
+        if rgbFace is not None:
+            ctx.save()
+            _set_rgba(ctx, rgbFace, gc.get_alpha(), gc.get_forced_alpha())
+            ctx.fill_preserve()
+            ctx.restore()
+        hatch_path = gc.get_hatch_path()
+        if hatch_path:
+            dpi = int(self.dpi)
+            hatch_surface = ctx.get_target().create_similar(
+                cairo.Content.COLOR_ALPHA, dpi, dpi)
+            hatch_ctx = cairo.Context(hatch_surface)
+            _append_path(hatch_ctx, hatch_path,
+                         Affine2D().scale(dpi, -dpi).translate(0, dpi),
+                         None)
+            hatch_ctx.set_line_width(self.points_to_pixels(gc.get_hatch_linewidth()))
+            hatch_ctx.set_source_rgba(*gc.get_hatch_color())
+            hatch_ctx.fill_preserve()
+            hatch_ctx.stroke()
+            hatch_pattern = cairo.SurfacePattern(hatch_surface)
+            hatch_pattern.set_extend(cairo.Extend.REPEAT)
+            ctx.save()
+            ctx.set_source(hatch_pattern)
+            ctx.fill_preserve()
+            ctx.restore()
+        ctx.stroke()
 
     def draw_markers(self, gc, marker_path, marker_trans, path, transform,
                      rgbFace=None):
@@ -227,8 +227,10 @@ class RendererCairo(RendererBase):
         y = self.height - y - im.shape[0]
 
         ctx.save()
-        ctx.set_source_surface(surface, float(x), float(y))
-        ctx.paint()
+        ctx.set_source_surface(surface, x, y)
+        ctx.new_path()
+        ctx.rectangle(x, y, im.shape[1], im.shape[0])
+        ctx.fill()
         ctx.restore()
 
     def draw_text(self, gc, x, y, s, prop, angle, ismath=False, mtext=None):
@@ -248,9 +250,7 @@ class RendererCairo(RendererBase):
             ctx.select_font_face(*_cairo_font_args_from_font_prop(prop))
             ctx.set_font_size(self.points_to_pixels(prop.get_size_in_points()))
             opts = cairo.FontOptions()
-            opts.set_antialias(
-                cairo.ANTIALIAS_DEFAULT if mpl.rcParams["text.antialiased"]
-                else cairo.ANTIALIAS_NONE)
+            opts.set_antialias(gc.get_antialiased())
             ctx.set_font_options(opts)
             if angle:
                 ctx.rotate(np.deg2rad(-angle))
@@ -267,13 +267,12 @@ class RendererCairo(RendererBase):
         if angle:
             ctx.rotate(np.deg2rad(-angle))
 
-        for font, fontsize, idx, ox, oy in glyphs:
+        for font, fontsize, ccode, _glyph_index, ox, oy in glyphs:
             ctx.new_path()
             ctx.move_to(ox, -oy)
-            ctx.select_font_face(
-                *_cairo_font_args_from_font_prop(ttfFontProperty(font)))
+            ctx.select_font_face(*_cairo_font_args_from_font_prop(ttfFontProperty(font)))
             ctx.set_font_size(self.points_to_pixels(fontsize))
-            ctx.show_text(chr(idx))
+            ctx.show_text(chr(ccode))
 
         for ox, oy, w, h in rects:
             ctx.new_path()
@@ -281,6 +280,32 @@ class RendererCairo(RendererBase):
             ctx.set_source_rgb(0, 0, 0)
             ctx.fill_preserve()
 
+        ctx.restore()
+
+    def draw_gouraud_triangles(self, gc, triangles_array, colors_array, transform):
+        # docstring inherited
+        transform = (transform
+                     + Affine2D().scale(1, -1).translate(0, self.height))
+        points_array = transform.transform(triangles_array.reshape((-1, 2)))
+        points_array = points_array.reshape((-1, 3, 2))
+
+        pattern = cairo.MeshPattern()
+        for points, colors in zip(points_array, colors_array):
+            pattern.begin_patch()
+            pattern.move_to(points[0, 0], points[0, 1])
+            pattern.line_to(points[1, 0], points[1, 1])
+            pattern.line_to(points[2, 0], points[2, 1])
+            for i in range(3):
+                pattern.set_corner_color_rgba(i, *colors[i, :])
+            pattern.end_patch()
+
+        ctx = gc.ctx
+        ctx.save()
+        ctx.set_source(pattern)
+        ctx.new_path()
+        for i in range(pattern.get_patch_count()):
+            ctx.append_path(pattern.get_path(i))
+        ctx.fill()
         ctx.restore()
 
     def get_canvas_width_height(self):
@@ -314,13 +339,52 @@ class RendererCairo(RendererBase):
     def new_gc(self):
         # docstring inherited
         self.gc.ctx.save()
+        # FIXME: The following doesn't properly implement a stack-like behavior
+        # and relies instead on the (non-guaranteed) fact that artists never
+        # rely on nesting gc states, so directly resetting the attributes (IOW
+        # a single-level stack) is enough.
         self.gc._alpha = 1
         self.gc._forced_alpha = False  # if True, _alpha overrides A from RGBA
+        self.gc._hatch = None
         return self.gc
 
     def points_to_pixels(self, points):
         # docstring inherited
         return points / 72 * self.dpi
+
+    def open_blend_group(self, blend_mode, *, alpha=1, knockout=False):
+        # docstring inherited
+        if blend_mode is not None:
+            _api.check_in_list(BlendMode, blend_mode=blend_mode)
+        self._group_states.append(
+            _GroupState(blend_mode, alpha, self._override_blend_mode_to_knockout)
+        )
+
+        if knockout and blend_mode is None:
+            _log.warning("A non-isolated blend group cannot also be a knockout "
+                         "blend group in the Cairo backend.  Falling back to a "
+                         "non-knockout blend group.")
+            knockout = False
+
+        if blend_mode is not None:
+            self.gc.ctx.push_group()
+            self._override_blend_mode_to_knockout = knockout
+
+    def close_blend_group(self):
+        # docstring inherited
+        group_state = self._group_states.pop()
+        self._override_blend_mode_to_knockout = group_state.old_override
+        if group_state.blend_mode is not None:
+            ctx = self.gc.ctx
+            group = ctx.pop_group()
+            ctx.save()
+            self.gc.set_blend_mode(group_state.blend_mode)
+            ctx.set_source(group)
+            if group_state.alpha != 1:
+                ctx.paint_with_alpha(group_state.alpha)
+            else:
+                ctx.paint()
+            ctx.restore()
 
 
 class GraphicsContextCairo(GraphicsContextBase):
@@ -336,6 +400,36 @@ class GraphicsContextCairo(GraphicsContextBase):
         'round':       cairo.LINE_CAP_ROUND,
     }
 
+    _operatord = {
+        'normal':      cairo.OPERATOR_OVER,
+        'knockout':    cairo.OPERATOR_SOURCE,
+        'erase':       cairo.OPERATOR_DEST_OUT,
+        'clear':       cairo.OPERATOR_CLEAR,
+        'atop':        cairo.OPERATOR_ATOP,
+        'xor':         cairo.OPERATOR_XOR,
+        'plus':        cairo.OPERATOR_ADD,
+        'multiply':    cairo.OPERATOR_MULTIPLY,
+        'screen':      cairo.OPERATOR_SCREEN,
+        'overlay':     cairo.OPERATOR_OVERLAY,
+        'darken':      cairo.OPERATOR_DARKEN,
+        'lighten':     cairo.OPERATOR_LIGHTEN,
+        'color dodge': cairo.OPERATOR_COLOR_DODGE,
+        'color burn':  cairo.OPERATOR_COLOR_BURN,
+        'hard light':  cairo.OPERATOR_HARD_LIGHT,
+        'soft light':  cairo.OPERATOR_SOFT_LIGHT,
+        'difference':  cairo.OPERATOR_DIFFERENCE,
+        'exclusion':   cairo.OPERATOR_EXCLUSION,
+        'hue':         cairo.OPERATOR_HSL_HUE,
+        'saturation':  cairo.OPERATOR_HSL_SATURATION,
+        'color':       cairo.OPERATOR_HSL_COLOR,
+        'luminosity':  cairo.OPERATOR_HSL_LUMINOSITY,
+    }
+
+    _filld = {
+        'nonzero': cairo.FILL_RULE_WINDING,
+        'evenodd': cairo.FILL_RULE_EVEN_ODD,
+    }
+
     def __init__(self, renderer):
         super().__init__()
         self.renderer = renderer
@@ -345,19 +439,18 @@ class GraphicsContextCairo(GraphicsContextBase):
 
     def set_alpha(self, alpha):
         super().set_alpha(alpha)
-        _alpha = self.get_alpha()
-        rgb = self._rgb
-        if self.get_forced_alpha():
-            self.ctx.set_source_rgba(rgb[0], rgb[1], rgb[2], _alpha)
-        else:
-            self.ctx.set_source_rgba(rgb[0], rgb[1], rgb[2], rgb[3])
+        _set_rgba(
+            self.ctx, self._rgb, self.get_alpha(), self.get_forced_alpha())
 
     def set_antialiased(self, b):
         self.ctx.set_antialias(
             cairo.ANTIALIAS_DEFAULT if b else cairo.ANTIALIAS_NONE)
 
+    def get_antialiased(self):
+        return self.ctx.get_antialias()
+
     def set_capstyle(self, cs):
-        self.ctx.set_line_cap(_api.check_getitem(self._capd, capstyle=cs))
+        self.ctx.set_line_cap(_api.getitem_checked(self._capd, capstyle=cs))
         self._capstyle = cs
 
     def set_clip_rectangle(self, rectangle):
@@ -400,12 +493,25 @@ class GraphicsContextCairo(GraphicsContextBase):
         return self.ctx.get_source().get_rgba()[:3]
 
     def set_joinstyle(self, js):
-        self.ctx.set_line_join(_api.check_getitem(self._joind, joinstyle=js))
+        self.ctx.set_line_join(_api.getitem_checked(self._joind, joinstyle=js))
         self._joinstyle = js
 
     def set_linewidth(self, w):
         self._linewidth = float(w)
         self.ctx.set_line_width(self.renderer.points_to_pixels(w))
+
+    def set_blend_mode(self, blend_mode):
+        super().set_blend_mode(blend_mode)
+        if self.renderer._override_blend_mode_to_knockout:
+            self.ctx.set_operator(cairo.OPERATOR_SOURCE)
+        else:
+            self.ctx.set_operator(_api.getitem_checked(self._operatord,
+                                                       blend_mode=self._blend_mode))
+
+    def set_fill_rule(self, fill_rule):
+        super().set_fill_rule(fill_rule)
+        self.ctx.set_fill_rule(_api.getitem_checked(self._filld,
+                                                    fill_rule=self._fill_rule))
 
 
 class _CairoRegion:
@@ -424,6 +530,9 @@ class FigureCanvasCairo(FigureCanvasBase):
         if not hasattr(self, "_cached_renderer"):
             self._cached_renderer = RendererCairo(self.figure.dpi)
         return self._cached_renderer
+
+    def get_renderer(self):
+        return self._renderer
 
     def copy_from_bbox(self, bbox):
         surface = self._renderer.gc.ctx.get_target()
@@ -472,9 +581,8 @@ class FigureCanvasCairo(FigureCanvasBase):
     def _get_printed_image_surface(self):
         self._renderer.dpi = self.figure.dpi
         width, height = self.get_width_height()
-        self._renderer.set_width_height(width, height)
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-        self._renderer.set_ctx_from_surface(surface)
+        self._renderer.set_context(cairo.Context(surface))
         self.figure.draw(self._renderer)
         return surface
 
@@ -511,11 +619,10 @@ class FigureCanvasCairo(FigureCanvasBase):
                     fobj = gzip.GzipFile(None, 'wb', fileobj=fobj)
             surface = cairo.SVGSurface(fobj, width_in_points, height_in_points)
         else:
-            raise ValueError("Unknown format: {!r}".format(fmt))
+            raise ValueError(f"Unknown format: {fmt!r}")
 
         self._renderer.dpi = self.figure.dpi
-        self._renderer.set_width_height(width_in_points, height_in_points)
-        self._renderer.set_ctx_from_surface(surface)
+        self._renderer.set_context(cairo.Context(surface))
         ctx = self._renderer.gc.ctx
 
         if orientation == 'landscape':
@@ -538,5 +645,6 @@ class FigureCanvasCairo(FigureCanvasBase):
 
 @_Backend.export
 class _BackendCairo(_Backend):
+    backend_version = cairo.version
     FigureCanvas = FigureCanvasCairo
     FigureManager = FigureManagerBase

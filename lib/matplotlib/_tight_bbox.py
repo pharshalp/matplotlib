@@ -5,7 +5,7 @@ Helper module for the *bbox_inches* parameter in `.Figure.savefig`.
 from matplotlib.transforms import Bbox, TransformedBbox, Affine2D
 
 
-def adjust_bbox(fig, bbox_inches, fixed_dpi=None):
+def adjust_bbox(fig, bbox_inches, renderer, fixed_dpi=None):
     """
     Temporarily adjust the figure so that only the specified area
     (bbox_inches) is saved.
@@ -17,16 +17,16 @@ def adjust_bbox(fig, bbox_inches, fixed_dpi=None):
     """
     origBbox = fig.bbox
     origBboxInches = fig.bbox_inches
-    orig_tight_layout = fig.get_tight_layout()
     _boxout = fig.transFigure._boxout
-
-    fig.set_tight_layout(False)
 
     old_aspect = []
     locator_list = []
     sentinel = object()
     for ax in fig.axes:
-        locator_list.append(ax.get_axes_locator())
+        locator = ax.get_axes_locator()
+        if locator is not None:
+            ax.apply_aspect(locator(ax, renderer))
+        locator_list.append(locator)
         current_pos = ax.get_position(original=False).frozen()
         ax.set_axes_locator(lambda a, r, _pos=current_pos: _pos)
         # override the method that enforces the aspect ratio on the Axes
@@ -47,7 +47,6 @@ def adjust_bbox(fig, bbox_inches, fixed_dpi=None):
 
         fig.bbox = origBbox
         fig.bbox_inches = origBboxInches
-        fig.set_tight_layout(orig_tight_layout)
         fig.transFigure._boxout = _boxout
         fig.transFigure.invalidate()
         fig.patch.set_bounds(0, 0, 1, 1)
@@ -71,7 +70,7 @@ def adjust_bbox(fig, bbox_inches, fixed_dpi=None):
     return restore_bbox
 
 
-def process_figure_for_rasterizing(fig, bbox_inches_restore, fixed_dpi=None):
+def process_figure_for_rasterizing(fig, bbox_inches_restore, renderer, fixed_dpi=None):
     """
     A function that needs to be called when figure dpi changes during the
     drawing (e.g., rasterizing).  It recovers the bbox and re-adjust it with
@@ -80,6 +79,6 @@ def process_figure_for_rasterizing(fig, bbox_inches_restore, fixed_dpi=None):
 
     bbox_inches, restore_bbox = bbox_inches_restore
     restore_bbox()
-    r = adjust_bbox(fig, bbox_inches, fixed_dpi)
+    r = adjust_bbox(fig, bbox_inches, renderer, fixed_dpi)
 
     return bbox_inches, r

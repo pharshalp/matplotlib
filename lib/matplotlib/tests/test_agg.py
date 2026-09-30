@@ -1,19 +1,29 @@
 import io
+import warnings
 
 import numpy as np
 from numpy.testing import assert_array_almost_equal
-from PIL import Image, TiffTags
+from PIL import features, Image, TiffTags
 import pytest
 
 
 from matplotlib import (
-    collections, path, pyplot as plt, transforms as mtransforms, rcParams)
+    collections, patheffects, pyplot as plt, transforms as mtransforms,
+    rcParams, rc_context)
 from matplotlib.backends.backend_agg import RendererAgg
 from matplotlib.figure import Figure
 from matplotlib.image import imread
+from matplotlib.patches import PathPatch, Polygon
 from matplotlib.path import Path
-from matplotlib.testing.decorators import image_comparison
+from matplotlib.testing.decorators import check_figures_equal, image_comparison
 from matplotlib.transforms import IdentityTransform
+
+
+def require_pillow_feature(name):
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        available = features.check(name.lower())
+    return pytest.mark.skipif(not available, reason=f"{name} support not available")
 
 
 def test_repeated_save_with_alpha():
@@ -55,7 +65,7 @@ def test_large_single_path_collection():
     # applied.
     f, ax = plt.subplots()
     collection = collections.PathCollection(
-        [path.Path([[-10, 5], [10, 5], [10, -5], [-10, -5], [-10, 5]])])
+        [Path([[-10, 5], [10, 5], [10, -5], [-10, -5], [-10, 5]])])
     ax.add_artist(collection)
     ax.set_xlim(10**-3, 1)
     plt.savefig(buff)
@@ -83,7 +93,7 @@ def test_long_path():
     fig.savefig(buff, format='png')
 
 
-@image_comparison(['agg_filter.png'], remove_text=True)
+@image_comparison(['agg_filter.png'], remove_text=True, style='_classic_test')
 def test_agg_filter():
     def smooth1d(x, window_len):
         # copied from https://scipy-cookbook.readthedocs.io/
@@ -180,10 +190,9 @@ def test_agg_filter():
         shadow.update_from(line)
 
         # offset transform
-        ot = mtransforms.offset_copy(line.get_transform(), ax.figure,
-                                     x=4.0, y=-6.0, units='points')
-
-        shadow.set_transform(ot)
+        transform = mtransforms.offset_copy(
+            line.get_transform(), fig, x=4.0, y=-6.0, units='points')
+        shadow.set_transform(transform)
 
         # adjust zorder of the shadow lines so that it is drawn below the
         # original lines
@@ -199,7 +208,7 @@ def test_agg_filter():
 
 
 def test_too_large_image():
-    fig = plt.figure(figsize=(300, 1000))
+    fig = plt.figure(figsize=(300, 2**25))
     buff = io.BytesIO()
     with pytest.raises(ValueError):
         fig.savefig(buff)
@@ -249,17 +258,53 @@ def test_pil_kwargs_tiff():
     assert tags["ImageDescription"] == "test image"
 
 
+@require_pillow_feature('WebP')
 def test_pil_kwargs_webp():
     plt.plot([0, 1, 2], [0, 1, 0])
     buf_small = io.BytesIO()
     pil_kwargs_low = {"quality": 1}
     plt.savefig(buf_small, format="webp", pil_kwargs=pil_kwargs_low)
+    assert len(pil_kwargs_low) == 1
     buf_large = io.BytesIO()
     pil_kwargs_high = {"quality": 100}
     plt.savefig(buf_large, format="webp", pil_kwargs=pil_kwargs_high)
+    assert len(pil_kwargs_high) == 1
     assert buf_large.getbuffer().nbytes > buf_small.getbuffer().nbytes
 
 
+@require_pillow_feature('AVIF')
+def test_pil_kwargs_avif():
+    plt.plot([0, 1, 2], [0, 1, 0])
+    buf_small = io.BytesIO()
+    pil_kwargs_low = {"quality": 1}
+    plt.savefig(buf_small, format="avif", pil_kwargs=pil_kwargs_low)
+    assert len(pil_kwargs_low) == 1
+    buf_large = io.BytesIO()
+    pil_kwargs_high = {"quality": 100}
+    plt.savefig(buf_large, format="avif", pil_kwargs=pil_kwargs_high)
+    assert len(pil_kwargs_high) == 1
+    assert buf_large.getbuffer().nbytes > buf_small.getbuffer().nbytes
+
+
+def test_gif_no_alpha():
+    plt.plot([0, 1, 2], [0, 1, 0])
+    buf = io.BytesIO()
+    plt.savefig(buf, format="gif", transparent=False)
+    im = Image.open(buf)
+    assert im.mode == "P"
+    assert im.info["transparency"] >= len(im.palette.colors)
+
+
+def test_gif_alpha():
+    plt.plot([0, 1, 2], [0, 1, 0])
+    buf = io.BytesIO()
+    plt.savefig(buf, format="gif", transparent=True)
+    im = Image.open(buf)
+    assert im.mode == "P"
+    assert im.info["transparency"] < len(im.palette.colors)
+
+
+@require_pillow_feature('WebP')
 def test_webp_alpha():
     plt.plot([0, 1, 2], [0, 1, 0])
     buf = io.BytesIO()
@@ -268,84 +313,142 @@ def test_webp_alpha():
     assert im.mode == "RGBA"
 
 
+@require_pillow_feature('AVIF')
+def test_avif_alpha():
+    plt.plot([0, 1, 2], [0, 1, 0])
+    buf = io.BytesIO()
+    plt.savefig(buf, format="avif", transparent=True)
+    im = Image.open(buf)
+    assert im.mode == "RGBA"
+
+
 def test_draw_path_collection_error_handling():
     fig, ax = plt.subplots()
-    ax.scatter([1], [1]).set_paths(path.Path([(0, 1), (2, 3)]))
+    ax.scatter([1], [1]).set_paths(Path([(0, 1), (2, 3)]))
     with pytest.raises(TypeError):
         fig.canvas.draw()
 
 
-@pytest.fixture
-def chunk_limit_setup():
+def test_chunksize_fails(high_memory):
+    # NOTE: This test covers multiple independent test scenarios in a single
+    #       function, because each scenario uses ~2GB of memory and we don't
+    #       want parallel test executors to accidentally run multiple of these
+    #       at the same time.
+
     N = 100_000
     dpi = 500
     w = 5*dpi
     h = 6*dpi
 
-    # just fit in the width
+    # make a Path that spans the whole w-h rectangle
     x = np.linspace(0, w, N)
-    # and go top-to-bottom
     y = np.ones(N) * h
     y[::2] = 0
+    path = Path(np.vstack((x, y)).T)
+    # effectively disable path simplification (but leaving it "on")
+    path.simplify_threshold = 0
 
-    idt = IdentityTransform()
-    # make a renderer
+    # setup the minimal GraphicsContext to draw a Path
     ra = RendererAgg(w, h, dpi)
-    # setup the minimal gc to draw a line
     gc = ra.new_gc()
     gc.set_linewidth(1)
     gc.set_foreground('r')
-    # make a Path
-    p = Path(np.vstack((x, y)).T)
-    # effectively disable path simplification (but leaving it "on")
-    p.simplify_threshold = 0
-
-    return ra, gc, p, idt
-
-
-def test_chunksize_hatch_fail(chunk_limit_setup):
-    ra, gc, p, idt = chunk_limit_setup
 
     gc.set_hatch('/')
+    with pytest.raises(OverflowError, match='cannot split hatched path'):
+        ra.draw_path(gc, path, IdentityTransform())
+    gc.set_hatch(None)
 
-    with pytest.raises(OverflowError, match='hatched path'):
-        ra.draw_path(gc, p, idt)
+    with pytest.raises(OverflowError, match='cannot split filled path'):
+        ra.draw_path(gc, path, IdentityTransform(), (1, 0, 0))
 
+    # Set to zero to disable, currently defaults to 0, but let's be sure.
+    with rc_context({'agg.path.chunksize': 0}):
+        with pytest.raises(OverflowError, match='Please set'):
+            ra.draw_path(gc, path, IdentityTransform())
 
-def test_chunksize_rgbFace_fail(chunk_limit_setup):
-    ra, gc, p, idt = chunk_limit_setup
+    # Set big enough that we do not try to chunk.
+    with rc_context({'agg.path.chunksize': 1_000_000}):
+        with pytest.raises(OverflowError, match='Please reduce'):
+            ra.draw_path(gc, path, IdentityTransform())
 
-    with pytest.raises(OverflowError, match='filled path'):
-        ra.draw_path(gc, p, idt, (1, 0, 0))
+    # Small enough we will try to chunk, but big enough we will fail to render.
+    with rc_context({'agg.path.chunksize': 90_000}):
+        with pytest.raises(OverflowError, match='Please reduce'):
+            ra.draw_path(gc, path, IdentityTransform())
 
-
-def test_chunksize_no_simplify_fail(chunk_limit_setup):
-    ra, gc, p, idt = chunk_limit_setup
-    p.should_simplify = False
+    path.should_simplify = False
     with pytest.raises(OverflowError, match="should_simplify is False"):
-        ra.draw_path(gc, p, idt)
+        ra.draw_path(gc, path, IdentityTransform())
 
 
-def test_chunksize_zero(chunk_limit_setup):
-    ra, gc, p, idt = chunk_limit_setup
-    # set to zero to disable, currently defaults to 0, but lets be sure
-    rcParams['agg.path.chunksize'] = 0
-    with pytest.raises(OverflowError, match='Please set'):
-        ra.draw_path(gc, p, idt)
+def test_non_tuple_rgbaface():
+    # This passes rgbaFace as an ndarray to draw_path.
+    fig = plt.figure()
+    fig.add_subplot(projection="3d").scatter(
+        [0, 1, 2], [0, 1, 2], path_effects=[patheffects.Stroke(linewidth=4)])
+    fig.canvas.draw()
 
 
-def test_chunksize_too_big_to_chunk(chunk_limit_setup):
-    ra, gc, p, idt = chunk_limit_setup
-    # set big enough that we do not try to chunk
-    rcParams['agg.path.chunksize'] = 1_000_000
-    with pytest.raises(OverflowError, match='Please reduce'):
-        ra.draw_path(gc, p, idt)
+def test_rendered_height_floating_point_precision():
+    fig = plt.figure(figsize=(1, 2.03), dpi=100)
+    assert fig.bbox.height < 203  # due to floating-point precision
+    fig.canvas.draw()
+    assert fig.canvas.buffer_rgba().shape == (203, 100, 4)
 
 
-def test_chunksize_toobig_chunks(chunk_limit_setup):
-    ra, gc, p, idt = chunk_limit_setup
-    # small enough we will try to chunk, but big enough we will fail
-    # to render
-    rcParams['agg.path.chunksize'] = 90_000
-    with pytest.raises(OverflowError, match='Please reduce'):
-        ra.draw_path(gc, p, idt)
+@check_figures_equal()
+def test_path_autosnap(fig_test, fig_ref):
+    axt = fig_test.subplots()
+    axr = fig_ref.subplots()
+
+    square = np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
+    triangle1 = np.array([[0, 2], [1, 2], [0, 3]])
+    triangle2 = np.array([[0, 4], [1, 4], [1, 3]])
+
+    # A square should autosnap
+    axt.add_patch(Polygon(square, snap=None))
+    axr.add_patch(Polygon(square, snap=True))
+
+    # A triangle with the diagonal as one of the line segments should not autosnap
+    axt.add_patch(Polygon(triangle1, snap=None))
+    axr.add_patch(Polygon(triangle1, snap=False))
+
+    # A triangle with the diagonal as the closing line segment should not autosnap
+    axt.add_patch(Polygon(triangle2, snap=None))
+    axr.add_patch(Polygon(triangle2, snap=False))
+
+    # A path of multiple polygons should autosnap if each polygon would autosnap
+    multiple1 = Path.make_compound_path(Polygon(square + [[2, 0]]).get_path(),
+                                        Polygon(square + [[2, 2]]).get_path())
+    axt.add_patch(PathPatch(multiple1, edgecolor='none', snap=None))
+    axr.add_patch(PathPatch(multiple1, edgecolor='none', snap=True))
+
+    # A path of multiple polygons should not autosnap if any polygon would not autosnap
+    multiple2 = Path.make_compound_path(Polygon(square + [[4, 0]]).get_path(),
+                                        Polygon(triangle1 + [[4, 0]]).get_path())
+    axt.add_patch(PathPatch(multiple2, edgecolor='none', snap=None))
+    axr.add_patch(PathPatch(multiple2, edgecolor='none', snap=False))
+
+    axt.autoscale_view()
+    axr.autoscale_view()
+
+
+def test_draw_text_images_bounds():
+    # Positions must describe bitmaps inside the buffer, as the renderer indexes
+    # into it without checking.
+    fig = plt.figure(figsize=(1, 1), dpi=40)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    gc = renderer.new_gc()
+    buffer = np.zeros(16, dtype=np.uint8)
+
+    for positions in [[[1 << 20, 4, 4, 5, 20]],  # Offset past the end.
+                      [[0, 400, 400, 5, 39]],  # Larger than the buffer.
+                      [[0, -4, 4, 5, 20]]]:  # Negative size.
+        with pytest.raises(ValueError, match='outside of buffer'):
+            renderer._renderer.draw_text_images(
+                buffer, np.array(positions, dtype=np.intp), gc)
+
+    renderer._renderer.draw_text_images(
+        buffer, np.array([[0, 2, 2, 1, 3]], dtype=np.intp), gc)

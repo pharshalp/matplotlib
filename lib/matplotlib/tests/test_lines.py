@@ -3,7 +3,7 @@ Tests specific to the lines module.
 """
 
 import itertools
-import timeit
+import platform
 from types import SimpleNamespace
 
 from cycler import cycler
@@ -12,6 +12,8 @@ from numpy.testing import assert_array_equal
 import pytest
 
 import matplotlib
+import matplotlib as mpl
+from matplotlib import _path
 import matplotlib.lines as mlines
 from matplotlib.markers import MarkerStyle
 from matplotlib.path import Path
@@ -28,52 +30,6 @@ def test_segment_hits():
     assert_array_equal(mlines.segment_hits(cx, cy, x, y, radius), [0])
 
 
-# Runtimes on a loaded system are inherently flaky. Not so much that a rerun
-# won't help, hopefully.
-@pytest.mark.flaky(reruns=3)
-def test_invisible_Line_rendering():
-    """
-    GitHub issue #1256 identified a bug in Line.draw method
-
-    Despite visibility attribute set to False, the draw method was not
-    returning early enough and some pre-rendering code was executed
-    though not necessary.
-
-    Consequence was an excessive draw time for invisible Line instances
-    holding a large number of points (Npts> 10**6)
-    """
-    # Creates big x and y data:
-    N = 10**7
-    x = np.linspace(0, 1, N)
-    y = np.random.normal(size=N)
-
-    # Create a plot figure:
-    fig = plt.figure()
-    ax = plt.subplot()
-
-    # Create a "big" Line instance:
-    l = mlines.Line2D(x, y)
-    l.set_visible(False)
-    # but don't add it to the Axis instance `ax`
-
-    # [here Interactive panning and zooming is pretty responsive]
-    # Time the canvas drawing:
-    t_no_line = min(timeit.repeat(fig.canvas.draw, number=1, repeat=3))
-    # (gives about 25 ms)
-
-    # Add the big invisible Line:
-    ax.add_line(l)
-
-    # [Now interactive panning and zooming is very slow]
-    # Time the canvas drawing:
-    t_invisible_line = min(timeit.repeat(fig.canvas.draw, number=1, repeat=3))
-    # gives about 290 ms for N = 10**7 pts
-
-    slowdown_factor = t_invisible_line / t_no_line
-    slowdown_threshold = 2  # trying to avoid false positive failures
-    assert slowdown_factor < slowdown_threshold
-
-
 def test_set_line_coll_dash():
     fig, ax = plt.subplots()
     np.random.seed(0)
@@ -82,8 +38,23 @@ def test_set_line_coll_dash():
     ax.contour(np.random.randn(20, 30), linestyles=[(0, (3, 3))])
 
 
-@image_comparison(['line_dashes'], remove_text=True)
+def test_invalid_line_data():
+    with pytest.raises(RuntimeError, match='xdata must be'):
+        mlines.Line2D(0, [])
+    with pytest.raises(RuntimeError, match='ydata must be'):
+        mlines.Line2D([], 1)
+
+    line = mlines.Line2D([], [])
+    with pytest.raises(RuntimeError, match='x must be'):
+        line.set_xdata(0)
+    with pytest.raises(RuntimeError, match='y must be'):
+        line.set_ydata(0)
+
+
+@image_comparison(['line_dashes'], remove_text=True, style='_classic_test', tol=0.003)
 def test_line_dashes():
+    # Tolerance introduced after reordering of floating-point operations
+    # Remove when regenerating the images
     fig, ax = plt.subplots()
 
     ax.plot(range(10), linestyle=(0, (3, 3)), lw=5)
@@ -108,7 +79,9 @@ def test_valid_colors():
 def test_linestyle_variants():
     fig, ax = plt.subplots()
     for ls in ["-", "solid", "--", "dashed",
-               "-.", "dashdot", ":", "dotted"]:
+               "-.", "dashdot", ":", "dotted",
+               (0, None), (0, ()), (0, []),  # gh-22930
+               ]:
         ax.plot(range(10), linestyle=ls)
     fig.canvas.draw()
 
@@ -119,7 +92,15 @@ def test_valid_linestyles():
         line.set_linestyle('aardvark')
 
 
-@image_comparison(['drawstyle_variants.png'], remove_text=True)
+@mpl.style.context('mpl20')
+def test_zero_linewidth_dashed_uses_solid_gc_dashes():
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], [0, 1], ls='--', lw=0)
+    fig.draw_without_rendering()
+
+
+@image_comparison(['drawstyle_variants.png'], remove_text=True, style='_classic_test',
+                  tol=0 if platform.machine() == 'x86_64' else 0.03)
 def test_drawstyle_variants():
     fig, axs = plt.subplots(6)
     dss = ["default", "steps-mid", "steps-pre", "steps-post", "steps", None]
@@ -132,7 +113,7 @@ def test_drawstyle_variants():
         ax.set(xlim=(0, 2), ylim=(0, 2))
 
 
-@check_figures_equal(extensions=('png',))
+@check_figures_equal()
 def test_no_subslice_with_transform(fig_ref, fig_test):
     ax = fig_ref.add_subplot()
     x = np.arange(2000)
@@ -162,14 +143,15 @@ def test_set_drawstyle():
     assert len(line.get_path().vertices) == len(x)
 
 
-@image_comparison(['line_collection_dashes'], remove_text=True, style='mpl20')
+@image_comparison(['line_collection_dashes'], remove_text=True, style='mpl20',
+                  tol=0 if platform.machine() == 'x86_64' else 0.65)
 def test_set_line_coll_dash_image():
     fig, ax = plt.subplots()
     np.random.seed(0)
     ax.contour(np.random.randn(20, 30), linestyles=[(0, (3, 3))])
 
 
-@image_comparison(['marker_fill_styles.png'], remove_text=True)
+@image_comparison(['marker_fill_styles.png'], remove_text=True, style='_classic_test')
 def test_marker_fill_styles():
     colors = itertools.cycle([[0, 0, 1], 'g', '#ff0000', 'c', 'm', 'y',
                               np.array([0, 0, 0])])
@@ -179,7 +161,11 @@ def test_marker_fill_styles():
     x = np.array([0, 9])
     fig, ax = plt.subplots()
 
-    for j, marker in enumerate(mlines.Line2D.filled_markers):
+    # This hard-coded list of markers correspond to an earlier iteration of
+    # MarkerStyle.filled_markers; the value of that attribute has changed but
+    # we kept the old value here to not regenerate the baseline image.
+    # Replace with mlines.Line2D.filled_markers when the image is regenerated.
+    for j, marker in enumerate("ov^<>8sp*hHDdPX"):
         for i, fs in enumerate(mlines.Line2D.fillStyles):
             color = next(colors)
             ax.plot(j * 10 + x, y + i + .5 * (j % 2),
@@ -193,8 +179,8 @@ def test_marker_fill_styles():
                     markeredgecolor=color,
                     markeredgewidth=2)
 
-    ax.set_ylim([0, 7.5])
-    ax.set_xlim([-5, 155])
+    ax.set_ylim(0, 7.5)
+    ax.set_xlim(-5, 155)
 
 
 def test_markerfacecolor_fillstyle():
@@ -216,11 +202,20 @@ def test_lw_scaling():
             ax.plot(th, j*np.ones(50) + .1 * lw, linestyle=ls, lw=lw, **sty)
 
 
-def test_nan_is_sorted():
-    line = mlines.Line2D([], [])
-    assert line._is_sorted(np.array([1, 2, 3]))
-    assert line._is_sorted(np.array([1, np.nan, 3]))
-    assert not line._is_sorted([3, 5] + [np.nan] * 100 + [0, 2])
+def test_is_sorted_and_has_non_nan():
+    with pytest.raises(ValueError):
+        _path.is_sorted_and_has_non_nan(None)
+    with pytest.raises(ValueError):
+        _path.is_sorted_and_has_non_nan([[[[None]], None]])
+    with pytest.raises(ValueError):
+        print(_path.is_sorted_and_has_non_nan([""]))
+    assert _path.is_sorted_and_has_non_nan(np.array([1, 2, 3]))
+    assert _path.is_sorted_and_has_non_nan(np.array([1, np.nan, 3]))
+    assert not _path.is_sorted_and_has_non_nan([3, 5] + [np.nan] * 100 + [0, 2])
+    # [2, 256] byteswapped:
+    assert not _path.is_sorted_and_has_non_nan(np.array([33554432, 65536], ">i4"))
+    n = 2 * mlines.Line2D._subslice_optim_min_size
+    plt.plot([np.nan] * n, range(n))
 
 
 @check_figures_equal()
@@ -230,7 +225,7 @@ def test_step_markers(fig_test, fig_ref):
 
 
 @pytest.mark.parametrize("parent", ["figure", "axes"])
-@check_figures_equal(extensions=('png',))
+@check_figures_equal()
 def test_markevery(fig_test, fig_ref, parent):
     np.random.seed(42)
     x = np.linspace(0, 1, 14)
@@ -282,6 +277,60 @@ def test_markevery_figure_line_unsupported_relsize():
         fig.canvas.draw()
 
 
+def test_markevery_extreme_zoom():
+    x = np.linspace(0, 10, 200)
+    fig, ax = plt.subplots()
+    ax.plot(x, np.sin(x), marker="o", markevery=0.05)
+    ax.set_xlim(5.000000, 5.000001)
+
+    # Calculating marker positions must not allocate an unbounded distance
+    # matrix when the axes are zoomed in extremely far.
+    fig.canvas.draw()
+
+
+@pytest.mark.parametrize("markevery", [0.0, -0.1])
+def test_markevery_float_nonpositive_spacing(markevery):
+    fig, ax = plt.subplots()
+    ax.plot([0, 1], marker="o", markevery=markevery)
+
+    with pytest.raises(ValueError, match="'markevery' step must be positive"):
+        fig.canvas.draw()
+
+
+@pytest.mark.parametrize(
+    ("markevery", "expected"),
+    [(1.5, [0, 3, 4, 5, 6, 7, 8]),
+     ((-0.2, 1.5), [0, 3, 4, 5, 6, 7]),
+     ((11.0, 1.5), [])])
+def test_markevery_float_vertex_selection(markevery, expected):
+    fig, ax = plt.subplots()
+    (x0, y0), (x1, y1) = ax.transAxes.transform([[0, 0], [1, 1]])
+    scale = np.hypot(x1 - x0, y1 - y0)
+    path = Path(np.column_stack([
+        [0, 0.2, 0.8, 1.6, 2.7, 4.1, 5.8, 7.8, 10], np.zeros(9)]))
+
+    actual = mlines._mark_every_path(
+        markevery, path, mtransforms.Affine2D().scale(scale), ax)
+
+    assert_array_equal(actual.vertices, path.vertices[expected])
+
+
+@pytest.mark.parametrize(
+    ("x", "expected"), [([0, 0.5, 1.5], [0, 1]), ([0, 0, 2], [0])])
+def test_markevery_float_ties_and_repeated_vertices(x, expected):
+    fig, ax = plt.subplots()
+    (x0, y0), (x1, y1) = ax.transAxes.transform([[0, 0], [1, 1]])
+    scale = np.hypot(x1 - x0, y1 - y0)
+    path = Path(np.column_stack([x, np.zeros(len(x))]))
+
+    actual = mlines._mark_every_path(
+        1.0, path, mtransforms.Affine2D().scale(scale), ax)
+
+    # Match np.argmin's preference for the first vertex on ties, including
+    # repeated cumulative distances.
+    assert_array_equal(actual.vertices, path.vertices[expected])
+
+
 def test_marker_as_markerstyle():
     fig, ax = plt.subplots()
     line, = ax.plot([2, 4, 3], marker=MarkerStyle("D"))
@@ -294,12 +343,23 @@ def test_marker_as_markerstyle():
     line.set_marker(MarkerStyle("o"))
     fig.canvas.draw()
     # test Path roundtrip
-    triangle1 = Path([[-1., -1.], [1., -1.], [0., 2.], [0., 0.]], closed=True)
+    triangle1 = Path._create_closed([[-1, -1], [1, -1], [0, 2]])
     line2, = ax.plot([1, 3, 2], marker=MarkerStyle(triangle1), ms=22)
     line3, = ax.plot([0, 2, 1], marker=triangle1, ms=22)
 
     assert_array_equal(line2.get_marker().vertices, triangle1.vertices)
     assert_array_equal(line3.get_marker().vertices, triangle1.vertices)
+
+
+@image_comparison(['striped_line.png'], remove_text=True, style='mpl20')
+def test_striped_lines(text_placeholders):
+    rng = np.random.default_rng(19680801)
+    _, ax = plt.subplots()
+    ax.plot(rng.uniform(size=12), color='orange', gapcolor='blue',
+            linestyle='--', lw=5, label='blue in orange')
+    ax.plot(rng.uniform(size=12), color='red', gapcolor='black',
+            linestyle=(0, (2, 5, 4, 2)), lw=5, label='black in red', alpha=0.5)
+    ax.legend(handlelength=5)
 
 
 @check_figures_equal()
@@ -345,14 +405,14 @@ def test_input_copy(fig_test, fig_ref):
     fig_ref.add_subplot().plot([0, 2, 4], [0, 2, 4], ".-", drawstyle="steps")
 
 
-@check_figures_equal(extensions=["png"])
+@check_figures_equal()
 def test_markevery_prop_cycle(fig_test, fig_ref):
     """Test that we can set markevery prop_cycle."""
     cases = [None, 8, (30, 8), [16, 24, 30], [0, -1],
              slice(100, 200, 3), 0.1, 0.3, 1.5,
              (0.0, 0.1), (0.45, 0.1)]
 
-    cmap = plt.get_cmap('jet')
+    cmap = mpl.colormaps['jet']
     colors = cmap(np.linspace(0.2, 0.8, len(cases)))
 
     x = np.linspace(-1, 1)
@@ -368,3 +428,45 @@ def test_markevery_prop_cycle(fig_test, fig_ref):
     ax = fig_test.add_subplot()
     for i, _ in enumerate(cases):
         ax.plot(y - i, 'o-')
+
+
+def test_axline_setters():
+    fig, ax = plt.subplots()
+    line1 = ax.axline((.1, .1), slope=0.6)
+    line2 = ax.axline((.1, .1), (.8, .4))
+    # Testing xy1, xy2 and slope setters.
+    # This should not produce an error.
+    line1.set_xy1((.2, .3))
+    line1.set_slope(2.4)
+    line2.set_xy1((.3, .2))
+    line2.set_xy2((.6, .8))
+    # Testing xy1, xy2 and slope getters.
+    # Should return the modified values.
+    assert line1.get_xy1() == (.2, .3)
+    assert line1.get_slope() == 2.4
+    assert line2.get_xy1() == (.3, .2)
+    assert line2.get_xy2() == (.6, .8)
+    with pytest.warns(mpl.MatplotlibDeprecationWarning):
+        line1.set_xy1(.2, .3)
+    with pytest.warns(mpl.MatplotlibDeprecationWarning):
+        line2.set_xy2(.6, .8)
+    # Testing setting xy2 and slope together.
+    # These test should raise a ValueError
+    with pytest.raises(ValueError,
+                       match="Cannot set an 'xy2' value while 'slope' is set"):
+        line1.set_xy2(.2, .3)
+
+    with pytest.raises(ValueError,
+                       match="Cannot set a 'slope' value while 'xy2' is set"):
+        line2.set_slope(3)
+
+
+def test_axline_small_slope():
+    """Test that small slopes are not coerced to zero in the transform."""
+    line = plt.axline((0, 0), slope=1e-14)
+    p1 = line.get_transform().transform_point((0, 0))
+    p2 = line.get_transform().transform_point((1, 1))
+    # y-values must be slightly different
+    dy = p2[1] - p1[1]
+    assert dy > 0
+    assert dy < 4e-12

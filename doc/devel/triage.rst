@@ -1,8 +1,9 @@
 
 .. _bug_triaging:
 
-Bug triaging and issue curation
-===============================
+*****************************
+Bug triage and issue curation
+*****************************
 
 The `issue tracker <https://github.com/matplotlib/matplotlib/issues>`_
 is important to communication in the project because it serves as the
@@ -11,49 +12,47 @@ identifying major projects to work on, and discussing priorities.  For
 this reason, it is important to curate the issue list, adding labels
 to issues and closing issues that are resolved or unresolvable.
 
+Writing well defined issues increases their chances of being successfully
+resolved. Guidelines on writing a good issue can be found in :ref:`here
+<submitting-a-bug-report>`. The recommendations in this page are adapted from
+the `scikit learn <https://scikit-learn.org/stable/developers/bug_triaging.html>`_
+and `Pandas <https://pandas.pydata.org/docs/development/maintaining.html>`_
+contributing guides.
+
+
+Improve issue reports
+=====================
+
 Triaging issues does not require any particular expertise in the
 internals of Matplotlib, is extremely valuable to the project, and we
 welcome anyone to participate in issue triage!  However, people who
 are not part of the Matplotlib organization do not have `permissions
 to change milestones, add labels, or close issue
 <https://docs.github.com/en/organizations/managing-access-to-your-organizations-repositories/repository-permission-levels-for-an-organization>`_.
-If you do not have enough GitHub permissions do something (e.g. add a
-label, close an issue), please leave a comment tagging
-``@matplotlib/triageteam`` with your recommendations!
 
-Working on issues to improve them
----------------------------------
+If you do not have enough GitHub permissions to do something (e.g. add a
+label, close an issue), please leave a comment with your recommendations!
 
-Improving issues increases their chances of being successfully resolved.
-Guidelines on submitting good issues can be found :ref:`here
-<submitting-a-bug-report>`.
-A third party can give useful feedback or even add
-comments on the issue.
 The following actions are typically useful:
 
-  - documenting issues that are missing elements to reproduce the problem
-    such as code samples
-
-  - suggesting better use of code formatting (e.g. triple back ticks in the
-    markdown).
-
-  - suggesting to reformulate the title and description to make them more
-    explicit about the problem to be solved
-
-  - linking to related issues or discussions while briefly describing
-    how they are related, for instance "See also #xyz for a similar
-    attempt at this" or "See also #xyz where the same thing was
-    reported" provides context and helps the discussion
-
-  - verifying that the issue is reproducible
-
-  - classify the issue as a feature request, a long standing bug or a
-    regression
+* documenting issues that are missing elements to reproduce the problem,
+  such as code samples;
+* suggesting better use of code formatting (e.g. triple back ticks in the
+  markdown);
+* suggesting to reformulate the title and description to make them more
+  explicit about the problem to be solved;
+* linking to related issues or discussions while briefly describing
+  how they are related, for instance "See also #xyz for a similar
+  attempt at this" or "See also #xyz where the same thing was
+  reported", which provides context and helps the discussion;
+* verifying that the issue is reproducible;
+* classifying the issue as a feature request, a long standing bug or a
+  regression.
 
 .. topic:: Fruitful discussions
 
-   Online discussions may be harder than it seems at first glance, in
-   particular given that a person new to open-source may have a very
+   Online discussions may be harder than they seem at first glance, in
+   particular given that a person new to open source may have a very
    different understanding of the process than a seasoned maintainer.
 
    Overall, it is useful to stay positive and assume good will. `The
@@ -62,57 +61,32 @@ The following actions are typically useful:
    explores how to lead online discussions in the context of open source.
 
 
-Triage team
------------
+Maintainers and triage team members
+-----------------------------------
 
+In addition to the above, maintainers and the triage team can do the following
+important tasks:
 
-If you would like to join the triage team:
-
-1. Correctly triage 2-3 issues.
-2. Ask someone on the `triage team
-   <https://github.com/orgs/matplotlib/teams/triageteam>`_ (publicly
-   or privately) to recommend you to the triage team .  If you worked
-   with someone on the issue triaged, they would be a good person to
-   ask.
-3. Responsibly exercise your new power!
-
-Anyone with commit or triage rights may also nominate a user to be
-invited to join the triage team.
-
-
-
-Triaging operations for members of the core and triage teams
-------------------------------------------------------------
-
-In addition to the above, members of the core team and the triage team
-can do the following important tasks:
-
-- Update labels for issues and PRs: see the list of `available github
+* Update labels for issues and PRs: see the list of `available GitHub
   labels <https://github.com/matplotlib/matplotlib/labels>`_.
+* Triage issues:
 
-- Triage issues:
-
-  - **reproduce the issue**, if the posted code is a bug label the issue
-    with "status: confirmed bug".
-
-  - **identify regressions**, determine if the reported bug used to
+  * **reproduce the issue**, and if the posted code is a bug label the issue
+    with `status: confirmed bug <https://github.com/matplotlib/matplotlib/issues?q=sort%3Aupdated-desc+state%3Aopen+label%3A%22status%3A+confirmed+bug%22>`_.
+  * **identify regressions**, determine if the reported bug used to
     work as expected in a recent version of Matplotlib and if so
     determine the last working version.  Regressions should be
     milestoned for the next bug-fix release and may be labeled as
     "Release critical".
-
-  - **close usage questions** and politely point the reporter to use
-    `discourse <https://discourse.matplotlib.org>`_ or Stack Overflow
-    instead and label as "community support".
-
-  - **close duplicate issues**, after checking that they are
+  * **close duplicate issues**, after checking that they are
     indeed duplicate. Ideally, the original submitter moves the
-    discussion to the older, duplicate issue
-
-  - **close issues that cannot be replicated**, after leaving time (at
-    least a week) to add extra information
-
-
+    discussion to the older, duplicate issue.
+  * **close issues that cannot be replicated**, after leaving time (at
+    least a week) to add extra information.
+  * **invite contributors to engage with the community** if the issue requires
+    more information or discussion. These discussions can take place in the
+    `weekly community meetings <https://scientific-python.org/calendars>`__, or
+    on `discourse <https://discourse.matplotlib.org>`__.
 
 .. topic:: Closing issues: a tough call
 
@@ -122,11 +96,12 @@ can do the following important tasks:
     question or has been considered as unclear for many years, then it
     should be closed.
 
+.. _triage_workflow:
 
-A typical workflow for triaging issues
---------------------------------------
+Triage workflow
+===============
 
-The following workflow [1]_ is a good way to approach issue triaging:
+The following workflow is a good way to approach issue triaging:
 
 #. Thank the reporter for opening an issue
 
@@ -134,13 +109,19 @@ The following workflow [1]_ is a good way to approach issue triaging:
    Matplotlib project itself, beyond just using the library. As such,
    we want it to be a welcoming, pleasant experience.
 
-#. Is this a usage question? If so close it with a polite message.
+#. Is this a usage question?
+
+   If so, close it with a polite message, point the reporter to use
+   `discourse <https://discourse.matplotlib.org>`__ or Stack Overflow instead
+   and use the
+   `community support <https://github.com/matplotlib/matplotlib/issues?q=sort%3Aupdated-desc+state%3Aopen+label%3A%22Community+support%22>`__
+   label, if you have the necessary permissions.
 
 #. Is the necessary information provided?
 
    Check that the poster has filled in the issue template. If crucial
    information (the version of Python, the version of Matplotlib used,
-   the OS, and the backend), is missing politely ask the original
+   the OS, and the backend) is missing, politely ask the original
    poster to provide the information.
 
 #. Is the issue minimal and reproducible?
@@ -157,17 +138,17 @@ The following workflow [1]_ is a good way to approach issue triaging:
    If a reproducible example is provided, but you see a simplification,
    add your simpler reproducible example.
 
-   If you can not reproduce the issue, please report that along with your
+   If you cannot reproduce the issue, please report that along with your
    OS, Python, and Matplotlib versions.
 
    If we need more information from either this or the previous step
-   please label the issue with "status: needs clarification".
+   please label the issue with `status: needs clarification <https://github.com/matplotlib/matplotlib/issues?q=sort%3Aupdated-desc+state%3Aopen+label%3A%22status%3A+needs+clarification%22>`_.
 
 #. Is this a regression?
 
    While we strive for a bug-free library, regressions are the highest
    priority.  If we have broken user-code that *used to* work, we should
-   fix that in the next patch release!
+   fix that in the next micro release!
 
    Try to determine when the regression happened by running the
    reproduction code against older versions of Matplotlib.  This can
@@ -175,7 +156,6 @@ The following workflow [1]_ is a good way to approach issue triaging:
    last worked in) or by using `git bisect
    <https://git-scm.com/docs/git-bisect>`_ to find the first commit
    where it was broken.
-
 
 #. Is this a duplicate issue?
 
@@ -189,39 +169,85 @@ The following workflow [1]_ is a good way to approach issue triaging:
    slightly different example, add it to the original issue as a comment
    or an edit to the original post.
 
-   Label the closed issue with "status: duplicate"
+   Label the closed issue with `status: duplicate <https://github.com/matplotlib/matplotlib/issues?q=sort%3Aupdated-desc+state%3Aopen+label%3A%22status%3A+duplicate%22>`__.
 
 #. Make sure that the title accurately reflects the issue. If you have the
    necessary permissions edit it yourself if it's not clear.
 
-#. Add the relevant labels, such as "Documentation" when the issue is
-   about documentation, "Bug" if it is clearly a bug, "New feature" if it
-   is a new feature request, ...
+#. Add the relevant labels, such as `Documentation <https://github.com/matplotlib/matplotlib/labels?q=documentation>`__
+   when the issue is about documentation, `status: confirmed bug <https://github.com/matplotlib/matplotlib/issues?q=sort%3Aupdated-desc+state%3Aopen+label%3A%22status%3A+confirmed+bug%22>`__
+   if it is clearly a bug, `New feature <https://github.com/matplotlib/matplotlib/issues?q=sort%3Aupdated-desc+state%3Aopen+label%3A%22New+feature%22>`__
+   if it is a new feature request, etc.
 
-   If the issue is clearly defined and the fix seems relatively
-   straightforward, label the issue as “Good first issue” (and
-   possibly a description of the fix or a hint as to where in the
-   code base to look to get started).
+   An additional useful step can be to tag with the relevant "topic: ..." label,
+   e.g. "topic: widgets/UI" or "topic: animation".
 
-   An additional useful step can be to tag the corresponding module e.g.
-   the "GUI/Qt" label when relevant.
+   Take some time to familiarize yourself with the available labels and their
+   meaning, and try to use them consistently.
 
+.. topic:: Good first issues
 
-.. [1] Adapted from the pandas project `maintainers guide
-       <https://dev.pandas.io/docs/development/maintaining.html>`_ and
-       `the scikit-learn project
-       <https://scikit-learn.org/dev/developers/bug_triaging.html>`_ .
+    If the issue is clearly defined, the fix seems relatively straightforward,
+    and there is consensus on what the solution is among maintainers, label the
+    issue as
+    `🌱 Good first issue <https://github.com/matplotlib/matplotlib/issues?q=state%3Aopen%20label%3A%22%F0%9F%8C%B1%20Good%20first%20issue%22>`_
+    (and possibly a description of the fix or a hint as to where in the
+    code base to look to get started).
 
+    Note that good first issues are intended to onboard newcomers with a genuine
+    interest in improving Matplotlib, in the hopes that they will continue to
+    participate in our development community; therefore, the use of AI tools to
+    resolve these issues is not appropriate.
 
-Working on PRs to help review
-------------------------------
+Preparing PRs for review
+========================
 
-Reviewing code is also encouraged. Contributors and users are welcome to
-participate to the review process following our :ref:`review guidelines
-<pr-guidelines>`.
+Doing initial reviews of contributions is also encouraged. Contributors and
+users are welcome to participate to the review process following our
+:ref:`review guidelines <pr-guidelines>`. In particular, if you identify a PR
+that needs maintainer attention, you can add the
+`status: needs review <https://github.com/matplotlib/matplotlib/issues?q=sort%3Aupdated-desc+state%3Aopen+label%3A%22status%3A+needs+review%22>`_
+label to it, or add it to the next community meeting agenda for discussion. You
+can:
 
-Acknowledgments
----------------
+* Suggest fixes to CI check failures, such as failing tests or documentation
+  builds;
+* Help with :ref:`rebasing instructions <rewriting-commit-history>`;
+* Suggest improvements to the PR description, including filling out the AI
+  Disclosure section if it is missing.
 
-This page is lightly adapted from `the sckit-learn project
-<https://scikit-learn.org/dev/developers/bug_triaging.html>`_ .
+AI-generated contributions
+--------------------------
+
+Make sure PRs comply with our :ref:`AI policy <generative_ai>`. If you identify
+a PR that does not comply with the policy, ask the contributor to clarify the AI
+tools used and the contribution of the author, and to update the PR description
+accordingly to comply with our AI policy.
+
+.. _triage_team:
+
+Triage team
+===========
+
+If you would like to join the triage team:
+
+1. Correctly triage 2-3 issues or review 2-3 pull requests, as described above.
+2. Ask someone on in the Matplotlib organization (publicly or privately) to
+   recommend you to the triage team (look for "Member" on the top-right of
+   comments on GitHub).  If you worked with someone on the issues triaged, they
+   would be a good person to ask.
+3. Responsibly exercise your new power!
+
+Anyone with commit or triage rights may nominate a user to be invited to join
+the triage team by nominating them through the private "Triage team nominations"
+category on `Discourse <https://discourse.matplotlib.org>`__ (Note that only
+``@maintainers`` and ``@triage`` members can see this category). The nomination
+will then be confirmed by the Steering Council and the user, if accepted, will
+be added to the triage team on GitHub.
+
+If no objections are raised within one week of the nomination, a member with the ``owner`` role on GitHub will:
+1. Send an invitation email to the nominee following a template.
+2. Once the nominee responds affirmatively, they will add the nominee to the Triage group on GitHub, and to the ``@triage`` group on Discourse.
+3. Close the Discourse thread with a confirmation that the nomination was accepted (or turned down).
+
+If objections are raised, no action will be taken and the nomination can be revisited in the future.

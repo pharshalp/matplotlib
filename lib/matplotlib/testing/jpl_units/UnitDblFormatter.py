@@ -14,15 +14,15 @@ class UnitDblFormatter(ticker.ScalarFormatter):
 
     def __call__(self, x, pos=None):
         # docstring inherited
-        if len(self.locs) == 0:
+        if len(self._locs) == 0:
             return ''
         else:
-            return '{:.12}'.format(x)
+            return f'{x:.12}'
 
     def format_data_short(self, value):
         # docstring inherited
-        return '{:.12}'.format(value)
+        return f'{value:.12}'
 
     def format_data(self, value):
         # docstring inherited
-        return '{:.12}'.format(value)
+        return f'{value:.12}'
